@@ -610,6 +610,21 @@ function clientView(o, preview) {
     safeUrl(c.posted_link) && h('a', { class: 'link', href: c.posted_link, target: '_blank', rel: 'noopener' }, 'View post', icon('out')),
   ], [watchButton(c)]);
 
+  // A creator campaign's client sees the results: views, videos out, and each creator's numbers.
+  if (o.kind === 'creators') {
+    return h('div', {},
+      topbar(preview && h('span', { class: 'sync' }, h('i', { class: 'dot dot-wait' }), `What ${o.client.name} sees`)),
+      page(
+        h('div', { class: 'page-head' }, h('div', {},
+          h('h1', { class: 'title' }, o.client.name),
+          h('p', { class: 'sub' }, `${plural(o.creators.posting, 'creator')} posting`))),
+        h('section', { class: 'stats', 'aria-label': 'Your campaign' },
+          headline(o),
+          stat('Creators posting', o.creators.posting, 'live right now'),
+          stat('Creators', o.creators.total, 'in the campaign')),
+        postsPanel(o.post_list) || h('p', { class: 'empty' }, 'Numbers show up here once the first videos are out')));
+  }
+
   return h('div', {},
     topbar(preview && h('span', { class: 'sync' }, h('i', { class: 'dot dot-wait' }), `What ${o.client.name} sees`)),
     page(
@@ -919,7 +934,8 @@ function creatorsBoard(b) {
       h('div', { class: 'page-head' },
         h('div', {},
           h('h1', { class: 'title' }, c.name),
-          h('p', { class: 'sub' }, `${plural(k.total, 'creator')} on the tracker, ${k.posting} posting`))),
+          h('p', { class: 'sub' }, `${plural(k.total, 'creator')} on the tracker, ${k.posting} posting`)),
+        h('a', { class: 'btn', href: `/client/${c.slug}/preview`, onclick: nav(`/client/${c.slug}/preview`) }, 'See what they see', icon('out'))),
 
       h('section', { class: 'stats', 'aria-label': c.name },
         c.posts ? headline(c) : [stat('Videos posted', k.videos_total, `${c.delivered_7d} in the last 7 days`), stat('Ready to post', k.ready, 'set up, not posting yet')],

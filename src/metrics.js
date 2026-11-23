@@ -313,6 +313,8 @@ export function clientOverview(db, cfg, client, now = Date.now()) {
   const pkg = packageProgress(db, client, billingRow ? JSON.parse(billingRow.data) : null, now);
   return {
     client: { name: client.name, slug: client.slug, bg_video: client.bg_video },
+    kind: client.kind || 'videos',
+    creators: client.kind === 'creators' ? { total: cards.length, posting: cards.filter((c) => c.status === 'Posting').length } : null,
     needs_approval: cards.filter(needsApproval).sort(byDate('due_date')).map(clientCard),
     changes_requested: cards.filter(changesRequested).sort(byDate('due_date')).map(clientCard),
     ready: cards.filter(readyToPost).sort(byDate('due_date')).map(clientCard),
