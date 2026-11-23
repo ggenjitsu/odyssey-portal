@@ -15,7 +15,7 @@ const locked = createMutex();
 
 const CARD_COLS = [
   'title', 'status', 'approval', 'approval_raw', 'editor_ids', 'editor_names', 'priority', 'funnel', 'posting', 'due_date',
-  'posted_date', 'posted_link', 'review_link', 'script_url', 'inspo_url', 'delay_reason', 'file_count', 'notion_url',
+  'posted_date', 'posted_link', 'review_link', 'script_url', 'inspo_url', 'delay_reason', 'file_count', 'weight', 'notion_url',
   'created_at', 'last_edited_at',
 ];
 
@@ -63,15 +63,14 @@ export function applyPull(db, client, propMap, cards, now) {
         ev(c, { field: 'created', to: c.status });
         continue;
       }
-      // First ever pull of this board: record where each card stands, and estimate when finished
-      // videos were delivered so the 7 and 30 day numbers are not empty on day one.
+      // First ever pull of this board: record where each card stands, and estimate when posted
+      // videos went out so the 7 and 30 day numbers are not empty on day one.
       ev(c, { field: 'status', to: c.status, source: 'baseline' });
       const when =
-        c.status === 'Ready' ? c.last_edited_at
-        : c.posted_date && ['Posted', 'Archive'].includes(c.status) ? noon(c.posted_date)
+        c.posted_date && ['Posted', 'Archive'].includes(c.status) ? noon(c.posted_date)
         : c.status === 'Posted' ? c.last_edited_at
         : null;
-      if (when) ev(c, { field: 'status', to: c.status === 'Ready' ? 'Ready' : 'Posted', source: 'backfill', at: when, note: 'Estimated from Notion dates' });
+      if (when) ev(c, { field: 'status', to: 'Posted', source: 'backfill', at: when, note: 'Estimated from Notion dates' });
       continue;
     }
     if (old.missing_since) ev(c, { field: 'restored', to: c.status });

@@ -14,8 +14,10 @@ export async function boot(cfg, log = console) {
   if (!db.prepare('SELECT 1 FROM clients LIMIT 1').get()) {
     const seedFile = path.resolve('seed/clients.json');
     const seed = fs.existsSync(seedFile) ? JSON.parse(fs.readFileSync(seedFile, 'utf8')) : [];
-    const insert = db.prepare('INSERT INTO clients (slug, name, notion_data_source_id, notion_url, created_at) VALUES (?, ?, ?, ?, ?)');
-    for (const c of seed) insert.run(c.slug, c.name, c.notion_data_source_id ?? null, c.notion_url ?? null, nowIso());
+    const insert = db.prepare(
+      'INSERT INTO clients (slug, name, notion_data_source_id, notion_url, package_size, package_max, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    );
+    for (const c of seed) insert.run(c.slug, c.name, c.notion_data_source_id ?? null, c.notion_url ?? null, c.package_size ?? null, c.package_max ?? null, nowIso());
   }
 
   // First run: create the owner's login from the environment.

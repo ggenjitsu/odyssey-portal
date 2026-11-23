@@ -11,7 +11,7 @@ import {
 import { adminOverview, clientOverview, editorOverview, recentEvents, lastSync } from './metrics.js';
 import { applyCardChange } from './sync.js';
 import { pageFiles } from './notion.js';
-import { STATUSES, WORK, needsApproval, readyToPost, clientVisible } from './rules.js';
+import { STATUSES, WORK, needsReview, needsApproval, readyToPost, clientVisible } from './rules.js';
 import { localDate } from './time.js';
 
 const COOKIE = 'ody_session';
@@ -182,13 +182,21 @@ export async function buildServer({ db, cfg, notion = null, slack = null, stripe
   }
 
   const missing = (reply) => reply.code(404).send({ error: 'Video not found' });
+
+  function saveFeedback(req, card, note, lead) {
+    const author = req.user.name || req.user.email;
+    db.prepare('INSERT INTO feedback (card_id, client_id, user_id, author, note, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(card.id, card.client_id, req.user.id, author, note, nowIso());
+    // Also leave the note on the Notion card. The portal keeps its own copy, so a failure here loses nothing.
+    notion.comment(card.id, `${lead} ${author}: ${note}`).catch((err) => req.log.warn(err));
+  }
   const anyone = { preHandler: need('admin', 'client', 'editor') };
 
   app.post('/api/cards/:id/approve', { preHandler: need('admin', 'client') }, async (req, reply) => {
     const card = cardFor(req);
     if (!card) return missing(reply);
     if (req.user.role === 'client' && !needsApproval(card)) return reply.code(409).send({ error: 'This video is not waiting for approval' });
-    return change(req, reply, card, { approval: 'approved', ...(card.status === 'Review' ? { status: 'Ready' } : {}) });
+    return change(req, reply, card, { approval: 'approved' });
   });
 
   app.post('/api/cards/:id/request-changes', { preHandler: need('admin', 'client') }, async (req, reply) => {
@@ -198,13 +206,30 @@ export async function buildServer({ db, cfg, notion = null, slack = null, stripe
     if (note.length < 3 || note.length > 2000) return reply.code(400).send({ error: 'Say what should change, in up to 2,000 characters' });
     if (req.user.role === 'client' && !needsApproval(card)) return reply.code(409).send({ error: 'This video is not waiting for approval' });
     const result = await change(req, reply, card, { approval: 'changes_requested', status: 'Revisions' }, note);
-    if (!result?.ok) return result;
-    const author = req.user.name || req.user.email;
-    db.prepare('INSERT INTO feedback (card_id, client_id, user_id, author, note, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(card.id, card.client_id, req.user.id, author, note, nowIso());
-    // Also leave the note on the Notion card. The portal keeps its own copy, so a failure here loses nothing.
-    notion.comment(card.id, `Changes requested by ${author}: ${note}`).catch((err) => req.log.warn(err));
+    if (result?.ok) saveFeedback(req, card, note, 'Changes requested by');
     return result;
+  });
+
+  // The team's own review (Ahmed or Genji): pass an edit on, or send it back to the editor with a note.
+  app.post('/api/cards/:id/review', admin, async (req, reply) => {
+    const card = cardFor(req);
+    if (!card) return missing(reply);
+    if (!needsReview(card)) return reply.code(409).send({ error: 'This video is not in review' });
+    const decision = String(req.body?.decision || '');
+    if (decision === 'pass') {
+      // Passing sends it to the client for approval when their board uses approvals, unless told otherwise.
+      const labels = JSON.parse(db.prepare('SELECT prop_map FROM clients WHERE id = ?').get(card.client_id).prop_map || '{}').approval?.labels || {};
+      const askClient = labels.needs_client && (req.body?.needs_client ?? ['needs_client', 'changes_requested'].includes(card.approval));
+      return change(req, reply, card, { status: 'Ready', ...(askClient ? { approval: 'needs_client' } : {}) });
+    }
+    if (decision === 'changes') {
+      const note = String(req.body?.note || '').trim();
+      if (note.length < 3 || note.length > 2000) return reply.code(400).send({ error: 'Say what should change, in up to 2,000 characters' });
+      const result = await change(req, reply, card, { status: 'Revisions' }, note);
+      if (result?.ok) saveFeedback(req, card, note, 'Sent back by');
+      return result;
+    }
+    return reply.code(400).send({ error: 'Decision must be pass or changes' });
   });
 
   app.post('/api/cards/:id/mark-posted', { preHandler: need('admin', 'client') }, async (req, reply) => {
@@ -251,7 +276,7 @@ export async function buildServer({ db, cfg, notion = null, slack = null, stripe
 
   // ---------- admin: clients ----------
 
-  const CLIENT_FIELDS = ['name', 'slug', 'slack_channel_id', 'stripe_customer_id', 'package_size', 'period_anchor', 'bg_video', 'active'];
+  const CLIENT_FIELDS = ['name', 'slug', 'slack_channel_id', 'stripe_customer_id', 'package_size', 'package_max', 'count_multiplier', 'period_anchor', 'bg_video', 'active'];
 
   function cleanClient(body) {
     const out = {};
@@ -259,10 +284,12 @@ export async function buildServer({ db, cfg, notion = null, slack = null, stripe
       if (!(k in (body || {}))) continue;
       let v = body[k];
       if (k === 'active') v = v ? 1 : 0;
-      else if (k === 'package_size') v = v === null || v === '' ? null : Math.max(0, Math.floor(Number(v)));
+      else if (k === 'package_size' || k === 'package_max') v = v === null || v === '' ? null : Math.max(0, Math.floor(Number(v)));
+      else if (k === 'count_multiplier') v = Number(v);
       else if (k === 'slug') v = slugify(v);
       else v = v === null || v === '' ? null : String(v).trim();
-      if (k === 'package_size' && Number.isNaN(v)) throw Object.assign(new Error('Package size must be a number'), { statusCode: 400 });
+      if (k.startsWith('package_') && Number.isNaN(v)) throw Object.assign(new Error('Package size must be a number'), { statusCode: 400 });
+      if (k === 'count_multiplier' && !(v > 0 && v <= 20)) throw Object.assign(new Error('Counts-as must be a number between 0 and 20'), { statusCode: 400 });
       if (k === 'period_anchor' && v && !/^\d{4}-\d{2}-\d{2}$/.test(v)) throw Object.assign(new Error('Use a date like 2026-11-01'), { statusCode: 400 });
       if ((k === 'name' || k === 'slug') && !v) throw Object.assign(new Error(`A client needs a ${k}`), { statusCode: 400 });
       out[k] = v;
@@ -272,7 +299,7 @@ export async function buildServer({ db, cfg, notion = null, slack = null, stripe
 
   app.get('/api/admin/clients', admin, async () => ({
     clients: db.prepare(
-      `SELECT id, slug, name, notion_data_source_id, notion_url, slack_channel_id, stripe_customer_id, package_size, period_anchor,
+      `SELECT id, slug, name, notion_data_source_id, notion_url, slack_channel_id, stripe_customer_id, package_size, package_max, count_multiplier, period_anchor,
               bg_video, active, baseline_at FROM clients ORDER BY name`,
     ).all(),
   }));
@@ -393,11 +420,15 @@ export async function buildServer({ db, cfg, notion = null, slack = null, stripe
     return { ok: true };
   });
 
-  app.get('/api/admin/settings', admin, async () => ({ slack_team_user_ids: getSetting(db, 'slack_team_user_ids', []) }));
+  const LISTS = { slack_team_user_ids: [], reviewer_names: ['Ahmed', 'Genji'] };
+  app.get('/api/admin/settings', admin, async () => Object.fromEntries(Object.entries(LISTS).map(([k, d]) => [k, getSetting(db, k, d)])));
   app.patch('/api/admin/settings', admin, async (req, reply) => {
-    const list = req.body?.slack_team_user_ids;
-    if (!Array.isArray(list) || list.some((x) => typeof x !== 'string')) return reply.code(400).send({ error: 'slack_team_user_ids must be a list of Slack user IDs' });
-    setSetting(db, 'slack_team_user_ids', list);
+    const changes = Object.entries(req.body || {}).filter(([k]) => k in LISTS);
+    if (!changes.length) return reply.code(400).send({ error: 'Nothing to change' });
+    for (const [k, list] of changes) {
+      if (!Array.isArray(list) || list.some((x) => typeof x !== 'string')) return reply.code(400).send({ error: `${k} must be a list of names or IDs` });
+    }
+    for (const [k, list] of changes) setSetting(db, k, list);
     return { ok: true };
   });
 

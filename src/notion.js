@@ -109,6 +109,8 @@ const CANDIDATES = {
   inspo_url: { names: ['Inspo'], types: ['url'] },
   delay_reason: { names: ['Delay Reason'], types: ['rich_text'] },
   files: { names: ['Edited Version'], types: ['files'] },
+  // How many accounts a video went out on, for clients whose package counts each upload.
+  weight: { names: ['Accounts Posted', 'Accounts', 'Post Count', 'Counts As'], types: ['number'] },
 };
 
 export function resolvePropMap(schemaProps = {}) {
@@ -148,6 +150,7 @@ function read(prop) {
     case 'select': return prop.select?.name ?? null;
     case 'url': return prop.url || null;
     case 'date': return prop.date?.start ?? null;
+    case 'number': return prop.number ?? null;
     case 'people': return (prop.people || []).filter((p) => p?.id);
     case 'files': return prop.files || [];
     default: return null;
@@ -178,6 +181,7 @@ export function normalizePage(page, map) {
     inspo_url: get('inspo_url'),
     delay_reason: get('delay_reason'),
     file_count: (get('files') || []).length,
+    weight: get('weight'),
     notion_url: page.url || null,
     created_at: page.created_time || null,
     last_edited_at: page.last_edited_time || null,

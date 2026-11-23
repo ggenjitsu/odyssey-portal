@@ -9,10 +9,13 @@ export const WORK = ['Ready to Edit', 'Editing', 'Revisions'];
 // An editor "finished" a video when it moves from WORK into one of these.
 export const EDITOR_DONE = ['Review', 'Ready', 'Posted'];
 
-// A video counts toward the client's package the first time it reaches one of these...
-export const DELIVERED_TO = ['Ready', 'Posted'];
-// ...and never again once it has been in any of these (Posted -> Archive is not a new delivery).
-export const AFTER_DELIVERY = ['Ready', 'Posted', 'Archive'];
+// Delivered means posted. Ready is finished but still waiting to go out.
+export const DELIVERED_TO = ['Posted'];
+// A video is only delivered once (Posted -> Archive is not a new delivery).
+export const AFTER_DELIVERY = ['Posted', 'Archive'];
+
+// The edit is done, so a due date can no longer be missed.
+export const FINISHED = ['Ready', 'Posted', 'Archive'];
 
 export const IN_PRODUCTION = ['Scripting', 'Filming', 'Ready to Edit', 'Editing', 'Revisions', 'Review'];
 
@@ -27,9 +30,17 @@ export function canonApproval(raw) {
   return null;
 }
 
-export const needsApproval = (c) => c.approval === 'needs_client' && ['Review', 'Ready'].includes(c.status);
-export const changesRequested = (c) => c.approval === 'changes_requested' && !AFTER_DELIVERY.includes(c.status);
-export const readyToPost = (c) => c.status === 'Ready' && !['needs_client', 'changes_requested'].includes(c.approval);
+const CLIENT_DECIDES = ['needs_client', 'changes_requested'];
+
+// Review is the team's own check (Ahmed or Genji). The client never sees a video at this stage.
+export const needsReview = (c) => c.status === 'Review';
+
+// Waiting on the client: passed the team's review and the client still has to say yes.
+// A reworked video that comes back to Ready counts too, even if nobody reset its Approval.
+export const needsApproval = (c) => c.status === 'Ready' && CLIENT_DECIDES.includes(c.approval);
+// The client asked for changes and the team is working on them.
+export const changesRequested = (c) => c.approval === 'changes_requested' && [...WORK, 'Review'].includes(c.status);
+export const readyToPost = (c) => c.status === 'Ready' && !CLIENT_DECIDES.includes(c.approval);
 export const wasPosted = (c) => c.status === 'Posted' || (c.status === 'Archive' && Boolean(c.posted_date || c.posted_link));
 
 // The only cards a client login can ever see or act on.

@@ -17,11 +17,12 @@ These live in `src/rules.js`. Change them there and every count follows.
 
 | Term | Meaning |
 |---|---|
-| Delivered | A video's first move into **Ready** or **Posted** |
+| Delivered | A video's first move into **Posted**. Ready means finished but not out yet. A video counts once per account it was posted on: the card's "Accounts Posted" number if the board has that column, else the client's counts-as setting |
+| Needs review | Status is **Review**: waiting on the team's own check (Ahmed or Genji) before the client sees it |
 | Editor finished | A move from **Ready to Edit / Editing / Revisions** into **Review / Ready / Posted**, credited to the editor on the card at that moment |
-| Needs approval | Approval is "Needs … Approval" and Status is **Review** or **Ready** |
+| Needs approval | Status is **Ready** and Approval is "Needs … Approval" (or still "Changes Requested" after a rework) |
 | Runway | Ready videos ÷ the client's posting rate over the last 30 days, in days |
-| Package progress | Delivered this billing period vs the client's package size. The period comes from Stripe, else the client's anchor date, else the calendar month |
+| Package progress | Delivered this billing period vs the client's package, which can be a range (30 to 45). Pace is judged against the lower number. The period comes from Stripe, else the client's anchor date, else the calendar month |
 
 Numbers from before the portal's first sync are estimates built from Notion's Posted Date and last-edited time. They are stored with `source = 'backfill'`.
 
@@ -59,7 +60,7 @@ All routes are under `/api`. Logins use a cookie. Changes must come from the por
 
 - `POST /auth/login`, `POST /auth/logout`, `POST /auth/accept-invite`, `GET /me`
 - `GET /admin/overview`, `GET /client/overview`, `GET /editor/overview`
-- `POST /cards/:id/approve`, `/request-changes`, `/mark-posted`, `/status`; `GET /cards/:id/media`, `/feedback`
+- `POST /cards/:id/approve`, `/request-changes`, `/mark-posted`, `/review`, `/status`; `GET /cards/:id/media`, `/feedback`
 - Admin: `/admin/clients`, `/admin/users`, `/admin/api-keys`, `/admin/settings`, `/admin/events`, `/admin/sync`, `/admin/sync-runs`, `/admin/notion/boards`, `/admin/slack/channels`, `/admin/slack/users`, `/admin/stripe/customers`
 - `GET /v1/summary` with `Authorization: Bearer <key>`: the admin overview, read-only, for other tools. Keys are made under `/admin/api-keys` and can do nothing else.
 

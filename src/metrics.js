@@ -1,17 +1,23 @@
-import { WORK, EDITOR_DONE, DELIVERED_TO, AFTER_DELIVERY, IN_PRODUCTION, needsApproval, changesRequested, readyToPost, wasPosted } from './rules.js';
+import { WORK, EDITOR_DONE, DELIVERED_TO, AFTER_DELIVERY, FINISHED, IN_PRODUCTION, needsReview, needsApproval, changesRequested, readyToPost, wasPosted } from './rules.js';
+import { getSetting } from './db.js';
 import { DAY, startOfDay, startOfWeek, localDate, monthlyPeriod } from './time.js';
 
 const ph = (a) => a.map(() => '?').join(', ');
 const iso = (d) => new Date(d).toISOString();
 const ids = (s) => JSON.parse(s || '[]');
 
-// Videos that reached the client for the first time inside the window.
+// What counts toward the package inside the window: each video the first time it is posted,
+// times the number of accounts it went out on (the card's own number if it has one, else the client's default).
 export function deliveredCount(db, clientId, since, until = '9999') {
-  return db.prepare(
-    `SELECT COUNT(DISTINCT card_id) AS n FROM events
-     WHERE client_id = ? AND at >= ? AND at < ? AND source != 'baseline' AND field IN ('status', 'created')
-       AND to_value IN (${ph(DELIVERED_TO)}) AND (from_value IS NULL OR from_value NOT IN (${ph(AFTER_DELIVERY)}))`,
-  ).get(clientId, since, until, ...DELIVERED_TO, ...AFTER_DELIVERY).n;
+  const { n } = db.prepare(
+    `SELECT COALESCE(SUM(w), 0) AS n FROM (
+       SELECT DISTINCT e.card_id, COALESCE(c.weight, cl.count_multiplier, 1) AS w
+       FROM events e JOIN cards c ON c.id = e.card_id JOIN clients cl ON cl.id = e.client_id
+       WHERE e.client_id = ? AND e.at >= ? AND e.at < ? AND e.source != 'baseline' AND e.field IN ('status', 'created')
+         AND e.to_value IN (${ph(DELIVERED_TO)}) AND (e.from_value IS NULL OR e.from_value NOT IN (${ph(AFTER_DELIVERY)}))
+     )`,
+  ).get(clientId, since, until, ...DELIVERED_TO, ...AFTER_DELIVERY);
+  return Math.round(n * 10) / 10;
 }
 
 function postedCount(db, clientId, since) {
@@ -34,12 +40,13 @@ export function billingPeriod(client, billing, now) {
 export function packageProgress(db, client, billing, now) {
   const period = billingPeriod(client, billing, now);
   const delivered = deliveredCount(db, client.id, period.start, period.end);
-  const out = { size: client.package_size ?? null, delivered, period_start: period.start, period_end: period.end, period_source: period.source };
+  const out = { size: client.package_size ?? null, max: client.package_max ?? client.package_size ?? null, delivered, period_start: period.start, period_end: period.end, period_source: period.source };
   out.days_left = Math.max(0, Math.ceil((Date.parse(period.end) - now) / DAY));
   if (client.package_size) {
     const elapsed = Math.min(1, Math.max(0, (now - Date.parse(period.start)) / (Date.parse(period.end) - Date.parse(period.start))));
     out.expected = Math.round(client.package_size * elapsed);
     out.remaining = Math.max(0, client.package_size - delivered);
+    out.remaining_to_max = Math.max(0, out.max - delivered);
     out.pace = delivered >= client.package_size ? 'complete' : delivered >= out.expected ? 'on_track' : 'behind';
   }
   return out;
@@ -59,15 +66,17 @@ function clientSummary(db, cfg, client, now) {
     id: client.id,
     slug: client.slug,
     name: client.name,
+    counts_as: client.count_multiplier,
     synced: Boolean(client.baseline_at),
     live_since: client.baseline_at,
     total: cards.length,
     by_status,
     in_production: cards.filter((c) => IN_PRODUCTION.includes(c.status)).length,
+    needs_review: cards.filter(needsReview).length,
     needs_approval: cards.filter(needsApproval).length,
     changes_requested: cards.filter(changesRequested).length,
     ready,
-    overdue: cards.filter((c) => c.due_date && c.due_date.slice(0, 10) < today && !AFTER_DELIVERY.includes(c.status)).length,
+    overdue: cards.filter((c) => c.due_date && c.due_date.slice(0, 10) < today && !FINISHED.includes(c.status)).length,
     delivered_7d: deliveredCount(db, client.id, iso(now - 7 * DAY)),
     delivered_30d: deliveredCount(db, client.id, iso(now - 30 * DAY)),
     posted_30d: posted30,
@@ -117,6 +126,18 @@ function editorSummaries(db, cfg, now) {
     .sort((a, b) => b.done_7d - a.done_7d || b.queue - a.queue || a.name.localeCompare(b.name));
 }
 
+// Edits waiting on the team's own review before the client sees them, longest wait first.
+function reviewQueue(db) {
+  return db.prepare(
+    `SELECT c.id, c.title, c.editor_names, c.due_date, c.priority, c.review_link, c.notion_url, c.file_count > 0 AS has_media,
+            cl.name AS client_name, cl.slug AS client_slug,
+            COALESCE((SELECT MAX(e.at) FROM events e WHERE e.card_id = c.id AND e.field IN ('status', 'created')
+                        AND e.to_value = 'Review' AND e.source != 'baseline'), c.last_edited_at) AS since
+     FROM cards c JOIN clients cl ON cl.id = c.client_id
+     WHERE c.missing_since IS NULL AND cl.active = 1 AND c.status = 'Review' ORDER BY since`,
+  ).all().map((c) => ({ ...c, has_media: Boolean(c.has_media) }));
+}
+
 export function recentEvents(db, { clientId = null, limit = 50, before = null } = {}) {
   const where = ["e.source != 'baseline'"];
   const args = [];
@@ -152,6 +173,7 @@ export function adminOverview(db, cfg, now = Date.now()) {
       delivered_7d: sum('delivered_7d'),
       delivered_30d: sum('delivered_30d'),
       in_production: sum('in_production'),
+      needs_review: sum('needs_review'),
       needs_approval: sum('needs_approval'),
       ready: sum('ready'),
       overdue: sum('overdue'),
@@ -159,6 +181,8 @@ export function adminOverview(db, cfg, now = Date.now()) {
       behind_on_package: clients.filter((c) => c.package.pace === 'behind').length,
     },
     clients,
+    reviewers: getSetting(db, 'reviewer_names', ['Ahmed', 'Genji']),
+    needs_review: reviewQueue(db),
     editors: editorSummaries(db, cfg, now),
     recent_events: recentEvents(db, { limit: 40 }),
   };
@@ -183,7 +207,7 @@ export function clientOverview(db, cfg, client, now = Date.now()) {
     ready: cards.filter(readyToPost).sort(byDate('due_date')).map(clientCard),
     posted: cards.filter(wasPosted).sort(byDate('posted_date', -1)).slice(0, 60).map(clientCard),
     in_production: cards.filter((c) => IN_PRODUCTION.includes(c.status) && !needsApproval(c) && !changesRequested(c)).length,
-    package: client.package_size ? { size: pkg.size, delivered: pkg.delivered, remaining: pkg.remaining, period_end: pkg.period_end, days_left: pkg.days_left } : null,
+    package: client.package_size ? { size: pkg.size, max: pkg.max, delivered: pkg.delivered, remaining: pkg.remaining, period_end: pkg.period_end, days_left: pkg.days_left } : null,
   };
 }
 

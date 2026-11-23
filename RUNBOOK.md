@@ -18,7 +18,7 @@ After the first admin login works, you can delete `ADMIN_PASSWORD` from Variable
 | Job | How |
 |---|---|
 | Add a client | Share their board with the "Odyssey Portal" integration in Notion (••• → Connections). Then `POST /api/admin/clients` with `name` and `notion` (the board link). Unattached boards are listed at `/api/admin/notion/boards` |
-| Set a client's package | `PATCH /api/admin/clients/:id` with `package_size` and either `stripe_customer_id` or `period_anchor` (a date; its day of the month starts each period) |
+| Set a client's package | `PATCH /api/admin/clients/:id` with `package_size` (and `package_max` for a range), plus either `stripe_customer_id` or `period_anchor` (a date; its day of the month starts each period). `count_multiplier` sets how many videos each post counts as when the board has no "Accounts Posted" column |
 | Watch a Slack channel | `PATCH /api/admin/clients/:id` with `slack_channel_id`. The bot must be invited to the channel |
 | Add a login | `POST /api/admin/users` with `email`, `role` and, for clients, `client_id`. Send the returned invite link. It works once and expires in 7 days |
 | Reset a password | `POST /api/admin/users/:id/invite` and send the new link |

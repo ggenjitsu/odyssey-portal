@@ -110,7 +110,7 @@ test('a client can approve, request changes and mark posted, and Notion gets eac
 });
 
 test('an editor is linked by email, sees only their queue and can only move their own cards forward', async () => {
-  const { login, as } = await setup();
+  const { boards, login, as } = await setup();
   const kunal = as(await login('kunal@odyssey.test'));
   assert.equal((await kunal.get('/api/me')).json().user.linked_to_notion, true);
   const view = (await kunal.get('/api/editor/overview')).json();
@@ -119,6 +119,20 @@ test('an editor is linked by email, sees only their queue and can only move thei
   assert.equal((await kunal.post('/api/cards/c2/status', { status: 'Posted' })).statusCode, 409);
   assert.equal((await kunal.post('/api/cards/c2/status', { status: 'Review' })).statusCode, 200);
   assert.equal((await kunal.get('/api/editor/overview')).json().counts.done_today, 1);
+  assert.equal((await kunal.post('/api/cards/c2/review', { decision: 'pass' })).statusCode, 403); // review is for the team leads
+
+  // The team reviews it: send it back once with a note, then pass it on to the client.
+  const boss = as(await login('boss@odyssey.test'));
+  assert.deepEqual((await boss.get('/api/admin/overview')).json().needs_review.map((c) => c.title), ['Cino in edit']);
+  assert.equal((await boss.post('/api/cards/c2/review', { decision: 'changes', note: 'Captions drift at 0:12' })).statusCode, 200);
+  assert.deepEqual((await kunal.get('/api/editor/overview')).json().queue[0].feedback.map((f) => f.note), ['Captions drift at 0:12']);
+  assert.equal((await boss.post('/api/cards/c2/review', { decision: 'pass' })).statusCode, 409); // back with the editor, not in review
+  await kunal.post('/api/cards/c2/status', { status: 'Review' });
+  assert.equal((await boss.post('/api/cards/c2/review', { decision: 'pass', needs_client: true })).statusCode, 200);
+  const c2 = boards.cino.pages[1].properties;
+  assert.deepEqual([c2.Status.status.name, c2.Approval.select.name], ['Ready', 'Needs Elena Approval']);
+  const elena = as(await login('elena@cino.test'));
+  assert.deepEqual((await elena.get('/api/client/overview')).json().needs_approval.map((c) => c.title).sort(), ['Cino in edit', 'Cino review']);
   assert.equal((await kunal.get('/api/admin/users')).statusCode, 403);
   assert.equal((await kunal.get('/api/client/overview')).statusCode, 403);
 });

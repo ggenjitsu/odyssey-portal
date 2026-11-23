@@ -37,12 +37,11 @@ test('first pull records a baseline and estimates past deliveries without invent
   assert.deepEqual(backfill.map((e) => [e.card_id, e.to_value, e.at]), [
     ['c2', 'Posted', '2026-11-18T12:00:00.000Z'],
     ['c3', 'Posted', '2026-08-01T12:00:00.000Z'],
-    ['c4', 'Ready', '2026-11-21T10:00:00.000Z'],
   ]);
   const c = client(db, 'cino');
   assert.ok(c.baseline_at);
-  // Delivered in the last 30 days: c2 (posted) and c4 (ready). c3 is too old.
-  assert.equal(deliveredCount(db, c.id, '2026-10-24T00:00:00.000Z'), 2);
+  // Delivered means posted. In the last 30 days that is only c2: c4 is Ready (not out yet) and c3 is too old.
+  assert.equal(deliveredCount(db, c.id, '2026-10-24T00:00:00.000Z'), 1);
   assert.equal(events(db, "source = 'sync'").length, 0);
 });
 
@@ -135,37 +134,45 @@ test('a portal action writes to Notion in the board\'s own words and is never lo
   assert.equal(events(db).length, 2);
 });
 
-test('overviews: delivery counts, editor output, package pace and what a client can see', async () => {
+test('overviews: review queue, delivery counts, editor output, package pace and what a client can see', async () => {
   const { db, notion, boards } = setup();
   await syncClient(db, notion, client(db, 'cino'), T0);
-  db.prepare("UPDATE clients SET package_size = 20, period_anchor = '2026-11-01' WHERE slug = 'cino'").run();
-  db.prepare("INSERT INTO users (email, role, notion_user_id, created_at) VALUES ('kunal@odyssey.test', 'editor', 'u-kunal', 'x')").run();
-  boards.cino.pages[0].properties.Status.status.name = 'Review'; // Kunal hands c1 off
+  db.prepare("UPDATE clients SET package_size = 60, package_max = 90, period_anchor = '2026-11-01' WHERE slug = 'cino'").run();
+  boards.cino.pages[0].properties.Status.status.name = 'Review'; // Kunal hands c1 off for the team's review
   boards.cino.pages[0].properties.Approval.select = { name: 'Needs Elena Approval' };
   await syncClient(db, notion, client(db, 'cino'), T1);
   const now = Date.parse('2026-11-23T10:00:00.000Z');
 
-  const admin = adminOverview(db, CFG, now);
-  const cino = admin.clients[0];
-  assert.equal(cino.delivered_30d, 2);
-  assert.equal(cino.needs_approval, 1);
-  assert.equal(cino.ready, 1);
-  assert.equal(cino.package.size, 20);
-  assert.equal(cino.package.delivered, 2);
-  assert.equal(cino.package.pace, 'behind');
+  let admin = adminOverview(db, CFG, now);
+  let cino = admin.clients[0];
+  assert.deepEqual(admin.needs_review.map((c) => [c.title, c.editor_names, c.since]), [['Split bills', 'Kunal', T1]]);
+  assert.deepEqual(admin.reviewers, ['Ahmed', 'Genji']);
+  assert.deepEqual([cino.needs_review, cino.needs_approval, cino.ready, cino.delivered_30d], [1, 0, 1, 1]);
+  assert.deepEqual([cino.package.size, cino.package.max, cino.package.delivered, cino.package.pace], [60, 90, 1, 'behind']);
   assert.equal(cino.package.period_start, '2026-11-01T00:00:00.000Z');
   assert.deepEqual(admin.editors.map((e) => [e.name, e.done_today, e.queue]), [['Kunal', 1, 0]]);
+  assert.equal(editorOverview(db, CFG, { notion_user_id: 'u-kunal' }, now).counts.done_today, 1);
 
-  const editor = editorOverview(db, CFG, { notion_user_id: 'u-kunal' }, now);
-  assert.equal(editor.counts.done_today, 1);
-  assert.equal(editor.in_review.length, 1);
+  // While it is in the team's review the client sees nothing of it.
+  let view = clientOverview(db, CFG, client(db, 'cino'), now);
+  assert.deepEqual([view.needs_approval.length, view.in_production], [0, 1]);
 
-  const view = clientOverview(db, CFG, client(db, 'cino'), now);
+  // The team passes it: now it is the client's turn.
+  boards.cino.pages[0].properties.Status.status.name = 'Ready';
+  await syncClient(db, notion, client(db, 'cino'), T2);
+  view = clientOverview(db, CFG, client(db, 'cino'), now);
   assert.deepEqual(view.needs_approval.map((c) => c.title), ['Split bills']);
   assert.deepEqual(view.ready.map((c) => c.title), ['Banked']);
   assert.deepEqual(view.posted.map((c) => c.title), ['Old post', 'Ancient post']);
-  assert.equal(view.in_production, 0);
   assert.ok(!('editor_names' in view.needs_approval[0]) && !('priority' in view.needs_approval[0]));
+  assert.equal(adminOverview(db, CFG, now).clients[0].delivered_30d, 1); // reaching Ready is not a delivery
+
+  // One Cino video goes out on several accounts: the client default applies unless the card says otherwise.
+  db.prepare("UPDATE clients SET count_multiplier = 3 WHERE slug = 'cino'").run();
+  assert.equal(adminOverview(db, CFG, now).clients[0].delivered_30d, 3);
+  db.prepare("UPDATE cards SET weight = 4 WHERE id = 'c2'").run();
+  cino = adminOverview(db, CFG, now).clients[0];
+  assert.deepEqual([cino.delivered_30d, cino.posted_30d, cino.package.delivered], [4, 1, 4]);
 });
 
 test('time helpers handle time zones and short months', () => {
