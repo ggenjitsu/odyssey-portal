@@ -180,7 +180,9 @@ export async function buildServer({ db, cfg, notion = null, slack = null, stripe
       ? db.prepare('SELECT * FROM clients WHERE slug = ?').get(String(req.query.client || ''))
       : db.prepare('SELECT * FROM clients WHERE id = ? AND active = 1').get(req.user.client_id);
     if (!client) return reply.code(404).send({ error: 'Client not found' });
-    return clientOverview(db, cfg, client);
+    const out = clientOverview(db, cfg, client);
+    out.client.background = backgroundFor(client);
+    return out;
   });
 
   app.get('/api/editor/overview', { preHandler: need('editor', 'admin') }, async (req, reply) => {

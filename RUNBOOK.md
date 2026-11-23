@@ -15,6 +15,8 @@ The login in `ADMIN_EMAIL` and `ADMIN_PASSWORD` is reset to those values on ever
 
 ## Everyday jobs
 
+Most of these have a screen now: **People** (add a login, new link, switch off, match an editor to Notion) and **Clients** (package, counts-as, period day, Slack channel, add a client). The API calls below do the same things.
+
 | Job | How |
 |---|---|
 | Add a client | Share their board with the "Odyssey Portal" integration in Notion (••• → Connections). Then `POST /api/admin/clients` with `name` and `notion` (the board link). Unattached boards are listed at `/api/admin/notion/boards` |

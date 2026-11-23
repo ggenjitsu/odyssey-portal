@@ -2,7 +2,8 @@
 // Everything that comes from Notion or a person is written as text, never as HTML.
 
 const app = document.getElementById('app');
-const state = { user: null, overview: null, sendBack: null, busy: new Set(), entered: false };
+const state = { user: null, overview: null, client: null, editor: null, people: null, clientList: null, channels: undefined,
+  sendBack: null, form: null, invite: null, busy: new Set(), entered: false };
 
 // ---------- helpers ----------
 
@@ -28,6 +29,9 @@ const ICONS = {
   back: '<polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/>',
   out: '<path d="M7 7h10v10"/><path d="M7 17 17 7"/>',
   refresh: '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>',
+  play: '<polygon points="6 3 20 12 6 21 6 3"/>',
+  copy: '<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
+  plus: '<path d="M5 12h14"/><path d="M12 5v14"/>',
   leave: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>',
 };
 function icon(name) {
@@ -163,14 +167,17 @@ function topbar(right) {
   return h('div', { class: 'topbar-wrap' },
     h('header', { class: 'topbar glass' },
       h('div', { class: 'wordmark' }, 'Odyssey', h('span', {}, 'Portal')),
+      state.user.role === 'admin' && h('nav', { class: 'nav', 'aria-label': 'Sections' },
+        [['/', 'Overview'], ['/clients', 'Clients'], ['/people', 'People']].map(([path, label]) =>
+          h('a', { href: path, 'aria-current': route() === path ? 'page' : null, onclick: nav(path) }, label))),
       h('div', { class: 'spacer' }),
       right,
       h('span', { class: 'who' }, state.user.name || state.user.email),
       h('button', { class: 'btn btn-quiet', type: 'button', 'aria-label': 'Sign out', title: 'Sign out',
         onclick: async () => {
           await api('/auth/logout', { method: 'POST' }).catch(() => {});
-          state.user = null;
-          state.overview = null;
+          Object.assign(state, { user: null, overview: null, client: null, editor: null, people: null, clientList: null, invite: null, form: null });
+          history.replaceState(null, '', '/');
           render();
         } }, icon('leave'))));
 }
@@ -200,6 +207,7 @@ async function act(key, fn) {
   try {
     await fn();
     state.sendBack = null;
+    state.form = null;
     await refresh();
   } catch (err) {
     toast(err.message);
@@ -273,7 +281,7 @@ function clientRow(c) {
   const waiting = c.slack?.waiting;
   return h('div', { class: 'row client' },
     h('div', {},
-      h('div', { class: 'client-name' }, c.name),
+      h('a', { class: 'client-name', href: `/client/${c.slug}`, title: 'See their portal', onclick: nav(`/client/${c.slug}`) }, c.name),
       h('div', { class: 'small' }, c.synced ? `${c.in_production} in production` : 'Not synced yet',
         c.overdue > 0 && h('span', { class: 'pace-behind' }, `, ${c.overdue} overdue`))),
     track(c.by_status),
@@ -359,37 +367,354 @@ function adminView(o) {
           : h('p', { class: 'empty' }, 'Changes show up here as cards move in Notion'))));
 }
 
-function soonView() {
+// ---------- pieces the client and editor views share ----------
+
+const panel = (title, hint, body) =>
+  h('section', { class: 'panel glass' }, h('div', { class: 'panel-head' }, h('h2', {}, title), hint && h('p', {}, hint)), body);
+const list = (items, row, empty) => (items.length ? h('div', { class: 'rows' }, items.map(row)) : h('p', { class: 'empty' }, empty));
+const field = (label, control) => h('label', { class: 'field' }, h('span', {}, label), control);
+const dateShort = (d) => (d ? new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short' }).format(new Date(d)) : '');
+const todayIso = () => new Date().toLocaleDateString('en-CA');
+const closeForm = () => { state.form = null; render(); };
+
+function showPlayer(title, url) {
+  const dlg = h('dialog', { class: 'player glass' },
+    h('div', { class: 'panel-head' }, h('h2', {}, title), h('button', { class: 'btn btn-quiet', type: 'button', onclick: () => dlg.close() }, 'Close')),
+    h('video', { src: url, controls: true, autoplay: true, playsinline: true }));
+  dlg.addEventListener('close', () => dlg.remove());
+  document.body.append(dlg);
+  dlg.showModal();
+}
+
+// Opens the review link if the card has one, else plays the file attached to the card in Notion.
+async function watch(c) {
+  const link = safeUrl(c.review_link);
+  if (link) return void window.open(link, '_blank', 'noopener');
+  try {
+    const { files } = await api(`/cards/${c.id}/media`);
+    const file = files.find((f) => safeUrl(f.url));
+    if (file) showPlayer(c.title, file.url);
+    else toast('No video is attached to this card yet');
+  } catch (err) {
+    toast(err.message);
+  }
+}
+const watchButton = (c) => (safeUrl(c.review_link) || c.has_media) && h('button', { class: 'btn', type: 'button', onclick: () => watch(c) }, icon('play'), 'Watch');
+
+function videoRow(c, meta, actions, form, extra) {
+  return h('div', { class: 'row review' },
+    h('div', {}, h('div', { class: 'review-title', title: c.title }, c.title), h('div', { class: 'meta' }, meta), extra),
+    !form && h('div', { class: 'actions' }, actions),
+    form);
+}
+
+// ---------- client ----------
+
+function clientView(o, preview) {
+  const p = o.package;
+  const range = p && (p.max && p.max !== p.size ? `${p.size} to ${p.max}` : `${p.size}`);
+  const isOpen = (c, kind) => state.form?.id === c.id && state.form.kind === kind;
+  const open = (c, kind) => { state.form = { id: c.id, kind, note: '', url: '', date: todayIso() }; render(); };
+
+  const approvalRow = (c) => {
+    const busy = state.busy.has(c.id);
+    let form = null;
+    if (isOpen(c, 'changes')) {
+      const note = h('textarea', { class: 'input', placeholder: 'What should change', 'aria-label': 'What should change', oninput: (e) => { state.form.note = e.target.value; } });
+      note.value = state.form.note;
+      queueMicrotask(() => note.focus());
+      form = h('div', { class: 'sendback' }, note, h('div', { class: 'actions' },
+        h('button', { class: 'btn btn-quiet', type: 'button', onclick: closeForm }, 'Cancel'),
+        h('button', { class: 'btn btn-primary', type: 'button', disabled: busy,
+          onclick: () => act(c.id, () => api(`/cards/${c.id}/request-changes`, { method: 'POST', body: { note: state.form.note } })) }, 'Send to Odyssey')));
+    }
+    return videoRow(c, [c.due_date && h('span', {}, `Due ${dateShort(c.due_date)}`)], [
+      watchButton(c),
+      h('button', { class: 'btn', type: 'button', disabled: busy, onclick: () => open(c, 'changes') }, 'Request changes'),
+      h('button', { class: 'btn btn-primary', type: 'button', disabled: busy, onclick: () => act(c.id, () => api(`/cards/${c.id}/approve`, { method: 'POST' })) }, icon('check'), 'Approve'),
+    ], form);
+  };
+
+  const readyRow = (c) => {
+    const busy = state.busy.has(c.id);
+    let form = null;
+    if (isOpen(c, 'posted')) {
+      const url = h('input', { class: 'input input-sm', type: 'url', placeholder: 'Link to the post, if you have it', 'aria-label': 'Link to the post', oninput: (e) => { state.form.url = e.target.value; } });
+      const date = h('input', { class: 'input input-sm', type: 'date', 'aria-label': 'Date posted', oninput: (e) => { state.form.date = e.target.value; } });
+      url.value = state.form.url;
+      date.value = state.form.date;
+      form = h('div', { class: 'sendback' }, h('div', { class: 'posted-fields' }, url, date), h('div', { class: 'actions' },
+        h('button', { class: 'btn btn-quiet', type: 'button', onclick: closeForm }, 'Cancel'),
+        h('button', { class: 'btn btn-primary', type: 'button', disabled: busy,
+          onclick: () => act(c.id, () => api(`/cards/${c.id}/mark-posted`, { method: 'POST', body: { url: state.form.url.trim(), date: state.form.date } })) }, 'Mark as posted')));
+    }
+    return videoRow(c, [c.posting && h('span', {}, sentence(c.posting))], [
+      watchButton(c),
+      h('button', { class: 'btn', type: 'button', disabled: busy, onclick: () => open(c, 'posted') }, 'Mark as posted'),
+    ], form);
+  };
+
+  const postedRow = (c) => videoRow(c, [
+    c.posted_date && h('span', {}, dateShort(c.posted_date)),
+    safeUrl(c.posted_link) && h('a', { class: 'link', href: c.posted_link, target: '_blank', rel: 'noopener' }, 'View post', icon('out')),
+  ], [watchButton(c)]);
+
+  return h('div', {},
+    topbar(preview && h('span', { class: 'sync' }, h('i', { class: 'dot dot-wait' }), `What ${o.client.name} sees`)),
+    page(
+      h('div', { class: 'page-head' }, h('div', {},
+        h('h1', { class: 'title' }, o.client.name),
+        h('p', { class: 'sub' }, p ? `${p.delivered} of ${range} posted this period, ${plural(p.days_left, 'day')} left` : `${plural(o.in_production, 'video')} in production`))),
+      h('section', { class: 'stats', 'aria-label': 'Your videos' },
+        stat('Needs your approval', o.needs_approval.length, 'watch, then approve or ask for changes', true),
+        stat('Being reworked', o.changes_requested.length, 'changes you asked for'),
+        stat('Ready to post', o.ready.length, 'approved and waiting to go out'),
+        stat('In production', o.in_production, 'scripting, filming or editing')),
+      panel('Needs your approval', null, list(o.needs_approval, approvalRow, 'Nothing needs you right now')),
+      h('div', { class: 'cols' },
+        panel('Ready to post', 'Tell us when one goes out', list(o.ready, readyRow, 'Nothing is waiting to go out')),
+        panel('Being reworked', null, list(o.changes_requested, (c) => videoRow(c, [h('span', {}, 'With the editor')], []), 'No changes in progress'))),
+      panel('Posted', 'Most recent first', list(o.posted, postedRow, 'Nothing posted yet'))));
+}
+
+// ---------- editor ----------
+
+function editorView(o) {
+  const today = todayIso();
+  const links = (c) => [['Script', c.script_url], ['Inspo', c.inspo_url], ['Notion', c.notion_url]]
+    .filter(([, u]) => safeUrl(u))
+    .map(([label, u]) => h('a', { class: 'link', href: u, target: '_blank', rel: 'noopener' }, label, icon('out')));
+  const meta = (c) => [
+    h('span', {}, c.client),
+    h('span', {}, sentence(c.status)),
+    c.priority && h('span', {}, `${c.priority} priority`),
+    c.due_date && h('span', { class: c.due_date.slice(0, 10) < today ? 'pace-behind' : '' }, `Due ${dateShort(c.due_date)}`),
+    links(c),
+  ];
+  const queueRow = (c) => {
+    const busy = state.busy.has(c.id);
+    const [to, label, primary] = c.status === 'Editing' ? ['Review', 'Send to review', true] : ['Editing', 'Start editing', false];
+    return videoRow(c, meta(c), [
+      watchButton(c),
+      h('button', { class: primary ? 'btn btn-primary' : 'btn', type: 'button', disabled: busy,
+        onclick: () => act(c.id, () => api(`/cards/${c.id}/status`, { method: 'POST', body: { status: to } })) }, label),
+    ], null, c.feedback.map((f) => h('p', { class: 'quote' }, `${f.author}: ${f.note}`)));
+  };
+  const doneRow = (d) => h('div', { class: 'row event' },
+    h('time', { datetime: d.at }, dateShort(d.at)), h('span', { class: 'where' }, d.client),
+    h('span', { class: 'what', title: d.title }, d.title), h('span', { class: 'by' }, sentence(d.to_value)));
+
   return h('div', {}, topbar(),
-    page(h('div', { class: 'page-head' }, h('div', {},
-      h('h1', { class: 'title' }, 'Almost ready'),
-      h('p', { class: 'sub' }, 'Your view of the portal is being finished. Your login already works')))));
+    page(
+      h('div', { class: 'page-head' }, h('div', {},
+        h('h1', { class: 'title' }, 'Your queue'),
+        h('p', { class: 'sub' }, o.linked ? `${plural(o.counts.queue, 'video')} to edit, ${o.counts.done_today} finished today`
+          : 'Your login is not matched to your name in Notion yet. Ask Odyssey to link it'))),
+      h('section', { class: 'stats', 'aria-label': 'Your work' },
+        stat('In your queue', o.counts.queue, 'ready to edit, editing or in revisions'),
+        stat('In revisions', o.counts.revisions, 'sent back with notes', true),
+        stat('Finished today', o.counts.done_today, 'handed off for review'),
+        stat('Finished this week', o.counts.done_week, 'since Monday')),
+      panel('Queue', 'Highest priority first', list(o.queue, queueRow, 'Your queue is clear')),
+      h('div', { class: 'cols' },
+        panel('Finished this week', null, list(o.done_week, doneRow, 'Nothing handed off yet this week')),
+        panel('In review', 'With Odyssey', list(o.in_review, (c) => videoRow(c, [h('span', {}, c.client)], []), 'Nothing in review')))));
+}
+
+// ---------- admin: people ----------
+
+const ROLE = { admin: 'Founder', editor: 'Editor', client: 'Client' };
+
+// Saves without redrawing first, so a failed save does not wipe what was typed.
+async function send(fn, done) {
+  try {
+    await fn();
+    await refresh();
+    render();
+    if (done) toast(done);
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+function linkBox(url, who) {
+  const input = h('input', { class: 'input input-sm', readonly: true, value: url, 'aria-label': 'Invite link', onfocus: (e) => e.target.select() });
+  return h('div', { class: 'linkbox' },
+    h('p', { class: 'small' }, `Send this link to ${who}. It works once, for 7 days, and lets them choose their own password`),
+    h('div', { class: 'linkbox-row' }, input,
+      h('button', { class: 'btn', type: 'button', onclick: async () => {
+        try {
+          await navigator.clipboard.writeText(url);
+          toast('Link copied');
+        } catch {
+          input.select();
+        }
+      } }, icon('copy'), 'Copy')));
+}
+
+function peopleView() {
+  const { users, notion_people: people } = state.people;
+  const clients = state.clientList || [];
+  const personRow = (u) => {
+    const who = u.name || u.email;
+    const match = u.role === 'editor' && h('select', { class: 'input input-sm', 'aria-label': `Notion name for ${who}`,
+      onchange: (e) => send(() => api(`/admin/users/${u.id}`, { method: 'PATCH', body: { notion_user_id: e.target.value || null } }), 'Saved') },
+      h('option', { value: '' }, 'Not matched to Notion'),
+      people.map((p) => h('option', { value: p.id, selected: p.id === u.notion_user_id }, p.name || p.email || 'Unnamed')));
+    return h('div', { class: 'row person' },
+      h('div', {}, h('div', { class: 'client-name' }, who), h('div', { class: 'small' }, u.email)),
+      h('div', {},
+        h('div', {}, u.role === 'client' ? `Client, ${u.client_name || 'no client set'}` : ROLE[u.role]),
+        h('div', { class: 'small' }, !u.active ? 'Switched off' : u.has_password ? 'Active' : 'Has not signed in yet')),
+      h('div', {}, match),
+      h('div', { class: 'actions' },
+        h('button', { class: 'btn', type: 'button', title: 'Makes a fresh sign-in link, for a first sign-in or a forgotten password',
+          onclick: () => send(async () => { state.invite = { id: u.id, who, url: (await api(`/admin/users/${u.id}/invite`, { method: 'POST' })).invite_url }; }) }, 'New link'),
+        u.id !== state.user.id && h('button', { class: 'btn btn-quiet', type: 'button',
+          onclick: () => send(() => api(`/admin/users/${u.id}`, { method: 'PATCH', body: { active: !u.active } })) }, u.active ? 'Switch off' : 'Switch on')),
+      state.invite?.id === u.id && linkBox(state.invite.url, state.invite.who));
+  };
+
+  const add = h('form', { class: 'form-grid',
+    onsubmit: (e) => {
+      e.preventDefault();
+      const body = Object.fromEntries(new FormData(e.target));
+      if (body.role === 'client') body.client_id = Number(body.client_id);
+      else delete body.client_id;
+      send(async () => {
+        const made = await api('/admin/users', { method: 'POST', body });
+        state.invite = { id: made.id, who: body.name || body.email, url: made.invite_url };
+      });
+    } },
+    field('Name', h('input', { class: 'input input-sm', name: 'name', autocomplete: 'off', required: true })),
+    field('Email', h('input', { class: 'input input-sm', name: 'email', type: 'email', autocomplete: 'off', required: true })),
+    field('Role', h('select', { class: 'input input-sm', name: 'role' },
+      h('option', { value: 'client' }, 'Client'), h('option', { value: 'editor' }, 'Editor'), h('option', { value: 'admin' }, 'Founder'))),
+    field('Client, for client logins', h('select', { class: 'input input-sm', name: 'client_id' }, clients.map((c) => h('option', { value: c.id }, c.name)))),
+    h('button', { class: 'btn btn-primary', type: 'submit' }, icon('plus'), 'Add and get link'));
+
+  return h('div', {}, topbar(),
+    page(
+      h('div', { class: 'page-head' }, h('div', {},
+        h('h1', { class: 'title' }, 'People'),
+        h('p', { class: 'sub' }, 'Founders see everything. Editors see their own queue. Clients see their own videos'))),
+      panel('Add someone', 'They get a link and choose their own password', add),
+      panel('Everyone with a login', null, h('div', { class: 'rows' }, users.map(personRow)))));
+}
+
+// ---------- admin: clients ----------
+
+function clientsView() {
+  const channels = state.channels;
+  const num = (name, value, extra = {}) => h('input', { class: 'input input-sm', name, type: 'number', min: 0, value: value ?? '', ...extra });
+  const row = (c) => h('form', { class: 'row client-form',
+    onsubmit: (e) => {
+      e.preventDefault();
+      const f = Object.fromEntries(new FormData(e.target));
+      const day = Number(f.day);
+      send(() => api(`/admin/clients/${c.id}`, { method: 'PATCH', body: {
+        package_size: f.package_size, package_max: f.package_max || f.package_size, count_multiplier: Number(f.count_multiplier) || 1,
+        period_anchor: day >= 1 && day <= 31 ? `2026-01-${pad(day)}` : null,
+        ...(channels ? { slack_channel_id: f.slack_channel_id || null } : {}),
+      } }), `${c.name} saved`);
+    } },
+    h('div', {},
+      h('div', { class: 'client-name' }, c.name),
+      h('a', { class: 'link', href: `/client/${c.slug}`, onclick: nav(`/client/${c.slug}`) }, 'See their portal', icon('out'))),
+    field('Package from', num('package_size', c.package_size)),
+    field('to', num('package_max', c.package_max)),
+    field('Counts as', num('count_multiplier', c.count_multiplier, { min: 0.5, max: 20, step: 0.5 })),
+    field('Starts on day', num('day', c.period_anchor ? Number(c.period_anchor.slice(8, 10)) : '', { min: 1, max: 31, placeholder: '1' })),
+    field('Slack channel', channels
+      ? h('select', { class: 'input input-sm', name: 'slack_channel_id' },
+        h('option', { value: '' }, 'Not linked'),
+        channels.map((ch) => h('option', { value: ch.id, selected: ch.id === c.slack_channel_id }, `#${ch.name}${ch.member ? '' : ' (invite the bot first)'}`)))
+      : h('input', { class: 'input input-sm', disabled: true, value: 'Slack is not connected' })),
+    h('button', { class: 'btn', type: 'submit' }, 'Save'));
+
+  const add = h('form', { class: 'form-grid',
+    onsubmit: (e) => {
+      e.preventDefault();
+      send(() => api('/admin/clients', { method: 'POST', body: Object.fromEntries(new FormData(e.target)) }), 'Client added. Their board syncs within a minute');
+    } },
+    field('Client name', h('input', { class: 'input input-sm', name: 'name', autocomplete: 'off', required: true })),
+    field('Link to their Notion board', h('input', { class: 'input input-sm', name: 'notion', type: 'url', autocomplete: 'off', required: true })),
+    h('button', { class: 'btn btn-primary', type: 'submit' }, icon('plus'), 'Add client'));
+
+  return h('div', {}, topbar(),
+    page(
+      h('div', { class: 'page-head' }, h('div', {},
+        h('h1', { class: 'title' }, 'Clients'),
+        h('p', { class: 'sub' }, 'Package size, how posts are counted, and which Slack channel to watch'))),
+      panel('Your clients', 'Posted videos count toward the package', h('div', { class: 'rows' }, state.clientList.map(row))),
+      panel('Add a client', 'Share their board with the Odyssey Portal connection in Notion first', add)));
 }
 
 // ---------- flow ----------
 
-function render() {
-  const invite = /^\/invite\/([\w-]+)/.exec(location.pathname);
-  setBackdrop(state.user ? state.user.background : '/bg/default.mp4');
-  let view;
-  if (!state.user) view = invite ? inviteView(invite[1]) : loginView();
-  else if (state.user.role === 'admin') view = state.overview ? adminView(state.overview) : h('div', {}, topbar());
-  else view = soonView();
-  app.replaceChildren(view);
+function route() {
+  return location.pathname.replace(/\/+$/, '') || '/';
 }
+function go(path) {
+  history.pushState(null, '', path);
+  Object.assign(state, { form: null, sendBack: null, invite: null });
+  load().then(render);
+}
+function nav(path) {
+  return (e) => {
+    e.preventDefault();
+    go(path);
+  };
+}
+window.addEventListener('popstate', () => load().then(render));
 
-async function refresh() {
-  if (state.user?.role !== 'admin') return;
+// Fetch what the current screen needs.
+async function load() {
+  const u = state.user;
+  if (!u) return;
+  const r = route();
   try {
-    state.overview = await api('/admin/overview');
+    if (u.role === 'admin') {
+      const preview = /^\/client\/([\w-]+)$/.exec(r);
+      if (preview) state.client = await api(`/client/overview?client=${encodeURIComponent(preview[1])}`);
+      else if (r === '/people') {
+        state.people = await api('/admin/users');
+        state.clientList = (await api('/admin/clients')).clients;
+      } else if (r === '/clients') {
+        state.clientList = (await api('/admin/clients')).clients;
+        if (state.channels === undefined) state.channels = await api('/admin/slack/channels').then((x) => x.channels, () => null);
+      } else state.overview = await api('/admin/overview');
+    } else if (u.role === 'client') state.client = await api('/client/overview');
+    else state.editor = await api('/editor/overview');
   } catch (err) {
     if (err.status === 401) state.user = null;
     else toast(err.message);
   }
 }
+const refresh = load;
+
+function render() {
+  const invite = /^\/invite\/([\w-]+)/.exec(location.pathname);
+  const u = state.user;
+  const r = route();
+  let bg = u ? u.background : '/bg/default.mp4';
+  let view;
+  if (!u) view = invite ? inviteView(invite[1]) : loginView();
+  else if (u.role === 'admin') {
+    if (r.startsWith('/client/') && state.client) {
+      view = clientView(state.client, true);
+      bg = state.client.client.background || bg;
+    } else if (r === '/people' && state.people) view = peopleView();
+    else if (r === '/clients' && state.clientList) view = clientsView();
+    else if (r === '/' && state.overview) view = adminView(state.overview);
+  } else if (u.role === 'client' && state.client) view = clientView(state.client);
+  else if (u.role === 'editor' && state.editor) view = editorView(state.editor);
+  setBackdrop(bg);
+  app.replaceChildren(view || h('div', {}, topbar()));
+}
 
 async function start() {
-  await refresh();
+  await load();
   render();
 }
 
@@ -400,9 +725,9 @@ try {
 }
 await start();
 
-// Keep the numbers fresh without interrupting someone who is typing.
+// Keep the numbers fresh without interrupting someone who is typing or filling in a form.
 setInterval(async () => {
-  if (!state.user || state.sendBack || state.busy.size || document.hidden) return;
-  await refresh();
+  if (!state.user || state.sendBack || state.form || state.busy.size || document.hidden || ['/people', '/clients'].includes(route())) return;
+  await load();
   render();
 }, 60_000);

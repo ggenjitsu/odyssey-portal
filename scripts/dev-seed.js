@@ -74,7 +74,14 @@ db.prepare('INSERT INTO sync_runs (started_at, finished_at, ok, cards, events, d
 const slack = db.prepare('INSERT INTO slack_status (client_id, channel_id, waiting, waiting_since, last_from, last_text, checked_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
 slack.run(1, 'C1', 1, iso(26 * 60 + 14), 'Elena', 'Can we get the rent one out before Friday?', iso(2));
 slack.run(3, 'C3', 0, null, null, null, iso(2));
-db.prepare("INSERT INTO users (email, name, role, password_hash, created_at) VALUES ('admin@local.test', 'Ahmed', 'admin', ?, ?)").run(await hashPassword('local-preview-1'), nowIso());
+const pw = await hashPassword('local-preview-1');
+const person = db.prepare('INSERT INTO users (email, name, role, password_hash, client_id, notion_user_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
+person.run('admin@local.test', 'Ahmed', 'admin', pw, null, null, nowIso());
+person.run('elena@local.test', 'Elena', 'client', pw, 1, null, nowIso());
+person.run('kunal@local.test', 'Kunal', 'editor', pw, null, 'u-kunal', nowIso());
+person.run('new.editor@local.test', 'Bilal', 'editor', null, null, null, nowIso());
+db.prepare("INSERT INTO feedback (card_id, client_id, user_id, author, note, created_at) SELECT id, client_id, 2, 'Elena', 'Open on the receipt, not on us talking', ? FROM cards WHERE title = 'We tried 50/50 for a month'").run(nowIso());
+db.prepare("UPDATE cards SET editor_ids = '[\"u-kunal\"]', editor_names = 'Kunal' WHERE title = 'We tried 50/50 for a month'").run();
 
 const cfg = { tz: 'Europe/London', prod: false, baseUrl: 'http://localhost:3222' };
 const app = await buildServer({ db, cfg, notion });
