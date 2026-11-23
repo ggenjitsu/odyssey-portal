@@ -20,6 +20,8 @@ const slugify = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').repla
 const isUrl = (s) => /^https?:\/\/\S+$/i.test(String(s || ''));
 const ids = (s) => JSON.parse(s || '[]');
 
+import { createMcp } from './mcp.js';
+
 const BUILD = process.env.RAILWAY_DEPLOYMENT_ID || process.env.RAILWAY_GIT_COMMIT_SHA || String(Date.now());
 
 export async function buildServer({ db, cfg, notion = null, slack = null, stripe = null, jobs = null, logger = false }) {
@@ -463,6 +465,26 @@ export async function buildServer({ db, cfg, notion = null, slack = null, stripe
   });
 
   // ---------- admin: keys, settings, lookups, sync ----------
+
+  // Assistants (Grok and the like) talk to the portal here, read-only, with a key made on the People page.
+  // The key goes in the Authorization header, or at the end of the address for clients that only take a URL.
+  const mcp = createMcp({ db, cfg });
+  const mcpPost = async (req, reply) => {
+    const key = req.params.key || /^Bearer (\S+)$/.exec(req.headers.authorization || '')?.[1] || '';
+    if (!apiKeyValid(db, key)) {
+      return reply.code(401).header('www-authenticate', 'Bearer').send({ jsonrpc: '2.0', id: null, error: { code: -32001, message: 'A valid portal key is required' } });
+    }
+    const body = req.body;
+    const out = Array.isArray(body) ? body.map(mcp).filter(Boolean) : mcp(body);
+    if (out == null || (Array.isArray(out) && !out.length)) return reply.code(202).send();
+    return reply.header('cache-control', 'no-store').send(out);
+  };
+  const mcpGet = async (req, reply) => reply.code(405).header('allow', 'POST').send({ error: 'This address answers POST requests from an MCP client' });
+  app.post('/mcp', mcpPost);
+  app.post('/mcp/:key', mcpPost);
+  app.get('/mcp', mcpGet);
+  app.get('/mcp/:key', mcpGet);
+  app.get('/.well-known/*', async (req, reply) => reply.code(404).send({ error: 'Not found' }));
 
   app.get('/api/admin/api-keys', admin, async () => ({
     keys: db.prepare('SELECT id, name, created_at, last_used_at, revoked_at FROM api_keys ORDER BY id DESC').all(),

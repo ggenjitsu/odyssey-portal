@@ -718,6 +718,19 @@ function linkBox(url, who) {
       } }, icon('copy'), 'Copy')));
 }
 
+function copyRow(label, value) {
+  const input = h('input', { class: 'input input-sm', readonly: true, value, 'aria-label': label, onfocus: (e) => e.target.select() });
+  return h('div', {}, h('p', { class: 'small' }, label),
+    h('div', { class: 'linkbox-row' }, input, h('button', { class: 'btn', type: 'button', onclick: async () => {
+      try {
+        await navigator.clipboard.writeText(value);
+        toast('Copied');
+      } catch {
+        input.select();
+      }
+    } }, icon('copy'), 'Copy')));
+}
+
 function peopleView() {
   const { users, notion_people: people } = state.people;
   const clients = state.clientList || [];
@@ -763,7 +776,27 @@ function peopleView() {
     page(
       h('div', { class: 'page-head' }, h('div', {}, h('h1', { class: 'title' }, 'People'))),
       panel('Add someone', 'They get a link and choose their own password', add),
-      panel('Everyone with a login', null, h('div', { class: 'rows' }, users.map(personRow)))));
+      panel('Everyone with a login', null, h('div', { class: 'rows' }, users.map(personRow))),
+      panel('Assistants', 'Read-only access for Grok or another assistant', h('div', {},
+        h('form', { class: 'form-grid',
+          onsubmit: (e) => {
+            e.preventDefault();
+            const name = new FormData(e.target).get('name');
+            send(async () => { state.newKey = (await api('/admin/api-keys', { method: 'POST', body: { name } })).key; }, 'Key made. Copy it now, it is shown once');
+          } },
+          field('What will use it', h('input', { class: 'input input-sm', name: 'name', placeholder: 'Grok', autocomplete: 'off', required: true })),
+          h('button', { class: 'btn btn-primary', type: 'submit' }, icon('plus'), 'Make a key')),
+        state.newKey && h('div', { class: 'linkbox keybox' },
+          copyRow('Server address', `${location.origin}/mcp`),
+          copyRow('Key, sent as the header Authorization: Bearer <key>', state.newKey),
+          copyRow('Or one address with the key inside, for assistants that only take a URL', `${location.origin}/mcp/${state.newKey}`),
+          h('p', { class: 'small' }, 'This is the only time the key is shown. Anyone with it can read the portal, so share it with the assistant only')),
+        h('div', { class: 'rows' }, (state.keys || []).map((k) => h('div', { class: 'row person' },
+          h('div', { class: 'client-name' }, k.name),
+          h('div', { class: 'small' }, k.revoked_at ? 'Switched off' : k.last_used_at ? `Last used ${ago(k.last_used_at)}` : 'Not used yet'),
+          h('div', {}),
+          h('div', { class: 'actions' }, !k.revoked_at && h('button', { class: 'btn btn-quiet', type: 'button',
+            onclick: () => send(() => api(`/admin/api-keys/${k.id}`, { method: 'DELETE' }), `${k.name} switched off`) }, 'Switch off')))))))));
 }
 
 // ---------- admin: clients ----------
@@ -1016,7 +1049,7 @@ let leaving = false;
 async function go(path) {
   if (state.stale) return location.assign(path); // the portal was updated: load the new version on the way
   history.pushState(null, '', path);
-  Object.assign(state, { form: null, sendBack: null, invite: null, settings: null, undo: null, entered: false });
+  Object.assign(state, { form: null, sendBack: null, invite: null, settings: null, undo: null, newKey: null, entered: false });
   const fresh = state.user?.role === 'admin' && path.startsWith('/client/');
   if (fresh) Object.assign(state, { board: null, client: null });
   leaving = true;
@@ -1057,6 +1090,7 @@ async function load() {
       else if (r === '/people') {
         state.people = await api('/admin/users');
         state.clientList = (await api('/admin/clients')).clients;
+        state.keys = (await api('/admin/api-keys')).keys;
       } else if (r === '/clients') {
         // The cards need both the settings rows and the counted numbers.
         [state.clientList, state.overview] = await Promise.all([api('/admin/clients').then((x) => x.clients), api('/admin/overview')]);

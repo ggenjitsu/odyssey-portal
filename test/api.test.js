@@ -184,3 +184,23 @@ test('a switched-off login stops working straight away', async () => {
   assert.equal((await elena.get('/api/me')).statusCode, 401);
   assert.equal((await elena.get('/api/client/overview')).statusCode, 401);
 });
+
+test('an assistant can read the portal over MCP with a key, and only with a key', async () => {
+  const { app, login } = await setup();
+  const boss = await login('boss@odyssey.test');
+  const made = await app.inject({ method: 'POST', url: '/api/admin/api-keys', cookies: boss, headers: { 'x-portal': '1' }, payload: { name: 'Grok' } });
+  const { key } = made.json();
+  const rpc = (url, body, headers = {}) => app.inject({ method: 'POST', url, headers, payload: body });
+  assert.equal((await rpc('/mcp', { jsonrpc: '2.0', id: 1, method: 'tools/list' })).statusCode, 401);
+  assert.equal((await rpc('/mcp/ody_wrong', { jsonrpc: '2.0', id: 1, method: 'tools/list' })).statusCode, 401);
+  const init = (await rpc('/mcp', { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26' } }, { authorization: `Bearer ${key}` })).json();
+  assert.deepEqual([init.result.protocolVersion, init.result.serverInfo.name], ['2025-03-26', 'odyssey-portal']);
+  assert.equal((await rpc(`/mcp/${key}`, { jsonrpc: '2.0', method: 'notifications/initialized' })).statusCode, 202);
+  const tools = (await rpc(`/mcp/${key}`, { jsonrpc: '2.0', id: 2, method: 'tools/list' })).json().result.tools.map((t) => t.name);
+  assert.deepEqual(tools, ['portal_overview', 'client_report', 'client_uploads']);
+  const call = async (name, args) => (await rpc(`/mcp/${key}`, { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name, arguments: args } })).json().result.content[0].text;
+  assert.match(await call('portal_overview', {}), /Clients:\n- Cino: .*in production/);
+  assert.match(await call('client_report', { client: 'Cino' }), /^Cino: .*By stage: /s);
+  assert.match(await call('client_uploads', { client: 'nobody' }), /No client by that name\. Clients: Cino, Noah/);
+  assert.equal((await app.inject({ method: 'GET', url: '/mcp' })).statusCode, 405);
+});
