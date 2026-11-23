@@ -20,6 +20,8 @@ const slugify = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').repla
 const isUrl = (s) => /^https?:\/\/\S+$/i.test(String(s || ''));
 const ids = (s) => JSON.parse(s || '[]');
 
+const BUILD = process.env.RAILWAY_DEPLOYMENT_ID || process.env.RAILWAY_GIT_COMMIT_SHA || String(Date.now());
+
 export async function buildServer({ db, cfg, notion = null, slack = null, stripe = null, jobs = null, logger = false }) {
   const app = Fastify({ trustProxy: true, bodyLimit: 64 * 1024, logger });
   await app.register(cookie);
@@ -61,6 +63,8 @@ export async function buildServer({ db, cfg, notion = null, slack = null, stripe
     reply.header('referrer-policy', 'same-origin');
     reply.header('x-frame-options', 'DENY');
     if (!req.url.startsWith('/api/')) reply.header('content-security-policy', CSP);
+    // Open tabs compare this with the build they loaded and refresh themselves after an update.
+    else reply.header('x-build', BUILD);
     return payload;
   });
 

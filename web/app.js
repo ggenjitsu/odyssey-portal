@@ -45,6 +45,10 @@ async function api(path, { method = 'GET', body } = {}) {
   const headers = { 'x-portal': '1' };
   if (body) headers['content-type'] = 'application/json';
   const res = await fetch(`/api${path}`, { method, headers, body: body ? JSON.stringify(body) : undefined, credentials: 'same-origin' });
+  // A different build means the portal was updated while this tab was open.
+  const build = res.headers.get('x-build');
+  if (build && !state.build) state.build = build;
+  else if (build && build !== state.build) state.stale = true;
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw Object.assign(new Error(data.error || 'Something went wrong'), { status: res.status });
   return data;
@@ -991,14 +995,22 @@ function route() {
 // Changing page: what is on screen fades out while the next page's data loads, then the new page fades in.
 let leaving = false;
 async function go(path) {
+  if (state.stale) return location.assign(path); // the portal was updated: load the new version on the way
   history.pushState(null, '', path);
   Object.assign(state, { form: null, sendBack: null, invite: null, settings: null, undo: null, entered: false });
+  const fresh = state.user?.role === 'admin' && path.startsWith('/client/');
+  if (fresh) Object.assign(state, { board: null, client: null });
   leaving = true;
-  if (!reduced()) app.classList.add('is-leaving');
-  await Promise.all([load(), reduced() ? null : wait(140)]);
-  app.classList.remove('is-leaving');
-  leaving = false;
+  const loaded = load();
+  if (!reduced()) {
+    app.classList.add('is-leaving');
+    await wait(140);
+    app.classList.remove('is-leaving');
+  }
   window.scrollTo(0, 0);
+  if (fresh) render(); // the page's outline straight away, its numbers the moment they land
+  await loaded;
+  leaving = false;
   render();
 }
 function nav(path) {
@@ -1033,12 +1045,38 @@ async function load() {
       } else state.overview = await api('/admin/overview');
     } else if (u.role === 'client') state.client = await api('/client/overview');
     else state.editor = await api('/editor/overview');
+    state.offline = false;
+    tries = 0;
   } catch (err) {
     if (err.status === 401) state.user = null;
+    else if (down(err)) retrySoon();
     else toast(err.message);
   }
 }
 const refresh = load;
+
+// The portal restarts for about half a minute when it is updated. Instead of a blank page, keep trying
+// quietly and say what is happening.
+function down(err) { return err.status === undefined || err.status >= 502; }
+let tries = 0;
+let retryTimer;
+function retrySoon() {
+  state.offline = true;
+  clearTimeout(retryTimer);
+  retryTimer = setTimeout(async () => {
+    await load();
+    render();
+  }, Math.min(1500 * 2 ** tries++, 8000));
+}
+
+// What shows while a page's numbers are on their way: the shape of the page, not an empty screen.
+function loadingView() {
+  return h('div', {}, topbar(),
+    h('main', { class: 'page skeleton' },
+      h('p', { class: 'sub' }, state.offline ? 'The portal is restarting. Back in a moment' : ''),
+      h('div', { class: 'stats' }, [0, 1, 2, 3].map(() => h('div', { class: 'stat glass sk' }))),
+      h('div', { class: 'panel glass sk sk-tall' })));
+}
 
 function render() {
   const invite = /^\/invite\/([\w-]+)/.exec(location.pathname);
@@ -1063,26 +1101,45 @@ function render() {
   const who = /^\/client\/([\w-]+)/.exec(r)?.[1] || (u?.role === 'client' && state.client?.client.slug) || '';
   document.documentElement.style.setProperty('--tint', TINTS[who] || TINTS.default);
   setBackdrop(bg);
-  app.replaceChildren(view || h('div', {}, topbar()));
+  app.replaceChildren(view || (u ? loadingView() : h('div', {})));
 }
 
 async function start() {
+  if (state.user) render();
   await load();
   render();
 }
 
 // Show the last picture straight away, before the first answer from the server.
 try { setBackdrop(localStorage.getItem('ody_bg') || '/bg/default.mp4'); } catch { setBackdrop('/bg/default.mp4'); }
-try {
-  state.user = (await api('/me')).user;
-} catch {
-  state.user = null;
+// If the portal is mid-restart when the page opens, wait for it instead of showing the sign-in screen.
+for (;;) {
+  try {
+    state.user = (await api('/me')).user;
+    break;
+  } catch (err) {
+    if (!down(err)) {
+      state.user = null;
+      break;
+    }
+    app.replaceChildren(h('div', { class: 'boot' }, 'The portal is restarting. Back in a moment'));
+    await wait(2000);
+  }
 }
 await start();
 
-// Keep the numbers fresh without interrupting someone who is typing or filling in a form.
-setInterval(async () => {
-  if (!state.user || leaving || state.sendBack || state.form || state.busy.size || document.hidden || ['/people', '/clients'].includes(route())) return;
+// Keep the numbers fresh without interrupting someone who is typing or filling in a form, and pick up a
+// new version of the portal by itself once one is out.
+async function tick() {
+  if (!state.user || leaving || document.hidden) return;
+  const typing = state.sendBack || state.form || state.settings || state.busy.size;
+  if (state.stale && !typing) return location.reload();
+  if (typing) return;
+  if (['/people', '/clients'].includes(route())) return void api('/health').catch(() => {});
   await load();
   render();
-}, 60_000);
+}
+setInterval(tick, 60_000);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && state.user) api('/health').then(tick, () => {});
+});
