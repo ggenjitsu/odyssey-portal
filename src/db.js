@@ -180,6 +180,8 @@ const MIGRATIONS = [
   CREATE INDEX posts_by_client ON posts (client_id, posted_on);
   ALTER TABLE clients ADD COLUMN posts_data_source_id TEXT;
   `,
+  // A posts-list row can stand for several uploads (one row per creator account, as SideShift reports them).
+  `ALTER TABLE posts ADD COLUMN uploads INTEGER NOT NULL DEFAULT 1;`,
 ];
 
 export function openDb(file) {

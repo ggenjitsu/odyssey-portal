@@ -284,9 +284,10 @@ function stat(label, figure, note, waiting) {
 // The two numbers that matter most lead every client page: views, and how much went out.
 function headline(o) {
   const p = o.package || {};
-  const posted = stat('Videos posted', p.delivered ?? 0, '');
+  // A creator campaign's list holds every upload ever tracked; a video client's is counted per period.
+  const posted = stat('Videos posted', o.kind === 'creators' && o.posts ? o.posts.total : p.delivered ?? 0, '');
   return o.posts
-    ? [stat('Views', o.posts.views, `on ${plural(o.posts.total, 'upload')}, ${dateUtc(o.posts.first)} to ${dateUtc(o.posts.last)}`), posted]
+    ? [stat('Views', o.posts.views, o.kind === 'creators' ? `on ${plural(o.posts.total, 'upload')}, from SideShift` : `on ${plural(o.posts.total, 'upload')}, ${dateUtc(o.posts.first)} to ${dateUtc(o.posts.last)}`), posted]
     : [posted, stat('Last 30 days', o.delivered_30d ?? 0, 'videos posted')];
 }
 
@@ -299,7 +300,8 @@ function postsPanel(posts) {
   const platforms = [...new Set(posts.map((p) => p.platform || 'Other'))];
   const views = (list) => list.reduce((n, p) => n + (p.views || 0), 0);
   const checked = posts.map((p) => p.views_checked).filter(Boolean).sort().pop();
-  const tally = (list) => h('div', { class: 'tally' }, h('b', {}, num(views(list))), h('small', {}, plural(list.length, 'upload')));
+  const uploads = (list) => list.reduce((n, p) => n + (p.uploads || 1), 0);
+  const tally = (list) => h('div', { class: 'tally' }, h('b', {}, num(views(list))), h('small', {}, plural(uploads(list), 'upload')));
   const table = h('div', { class: 'tallies' },
     h('span', {}), platforms.map((pl) => h('span', { class: 'th' }, pl)), h('span', { class: 'th' }, 'All'),
     accounts.map((a) => {
@@ -312,13 +314,13 @@ function postsPanel(posts) {
   const row = (p) => h('a', { class: 'row post', href: safeUrl(p.url), target: '_blank', rel: 'noopener' },
     h('time', {}, p.posted_on ? dateUtc(p.posted_on) : ''),
     h('span', { class: 'post-where' }, p.platform || ''),
-    h('span', { class: 'post-acct' }, p.account || '', p.title && !/^(reel|tiktok)\b/i.test(p.title) && h('small', {}, p.title)),
+    h('span', { class: 'post-acct' }, p.account || '', p.title && !/^(reel|tiktok)\b/i.test(p.title) && h('small', {}, p.uploads > 1 ? `@${p.title.replace(/^@/, '')}, ${p.uploads} uploads` : p.title)),
     h('b', { class: 'post-views' }, num(p.views)),
     h('span', { class: 'link' }, 'Open', icon('out')));
   return h('section', { class: 'panel glass' },
-    h('div', { class: 'panel-head' }, h('h2', {}, 'Views'), h('p', {}, `${num(views(posts))} views on ${plural(posts.length, 'upload')}${checked ? `, counted ${dateUtc(checked)}` : ''}`)),
+    h('div', { class: 'panel-head' }, h('h2', {}, 'Views'), h('p', {}, `${num(views(posts))} views on ${plural(uploads(posts), 'upload')}${checked ? `, counted ${dateUtc(checked)}` : ''}`)),
     table,
-    h('div', { class: 'panel-head' }, h('h2', {}, 'Every upload'), h('div', { class: 'actions' }, sortBy('date', 'Newest'), sortBy('views', 'Most viewed'))),
+    h('div', { class: 'panel-head' }, h('h2', {}, posts.some((p) => p.uploads > 1) ? 'Every account' : 'Every upload'), h('div', { class: 'actions' }, sortBy('date', 'Newest'), sortBy('views', 'Most viewed'))),
     h('div', { class: 'rows post-list' }, rows.map(row)));
 }
 
@@ -422,7 +424,7 @@ function clientRow(c) {
   if (c.kind === 'creators') {
     const k = c.creators;
     return h('div', { class: 'row client' },
-      h('div', {}, name, h('div', { class: 'small' }, c.synced ? `${plural(k.total, 'creator')}, ${plural(k.videos_total, 'video')} so far` : 'Not synced yet')),
+      h('div', {}, name, h('div', { class: 'small' }, c.synced ? `${plural(k.total, 'creator')}, ${plural(c.posts?.total ?? k.videos_total, 'video')} so far` : 'Not synced yet')),
       track(c.by_status, c.stages?.length ? c.stages : Object.keys(c.by_status), creatorSeg, (s) => /paused|silent/i.test(s), 'No creators on the tracker yet'),
       packageCell(c),
       h('div', {},
@@ -917,13 +919,14 @@ function creatorsBoard(b) {
       h('div', { class: 'page-head' },
         h('div', {},
           h('h1', { class: 'title' }, c.name),
-          h('p', { class: 'sub' }, `${plural(k.total, 'creator')}, ${plural(k.videos_total, 'video')} posted so far`))),
+          h('p', { class: 'sub' }, `${plural(k.total, 'creator')} on the tracker, ${k.posting} posting`))),
 
       h('section', { class: 'stats', 'aria-label': c.name },
-        stat('Posting', k.posting, 'creators live right now'),
-        stat('Ready to post', k.ready, 'set up, not posting yet'),
-        stat('Chase now', k.chase_now, k.nudge ? `${k.nudge} more to nudge` : 'nobody else to nudge', true),
-        stat('Videos posted', k.videos_total, `${c.delivered_7d} in the last 7 days`)),
+        c.posts ? headline(c) : [stat('Videos posted', k.videos_total, `${c.delivered_7d} in the last 7 days`), stat('Ready to post', k.ready, 'set up, not posting yet')],
+        stat('Posting', k.posting, `creators live, ${k.ready} more ready to post`),
+        stat('Chase now', k.chase_now, k.nudge ? `${k.nudge} more to nudge` : 'nobody else to nudge', true)),
+
+      postsPanel(b.posts),
 
       panel('Creators', 'Every creator, by stage. Click one to open it in Notion',
         h('div', { class: 'board' }, stages.map(column))),

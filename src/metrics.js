@@ -31,13 +31,13 @@ function videosDelta(db, clientId, since, until = '9999') {
 // Outside those days the count is still Notion cards times their multiplier, so the estimate gives way to
 // the real number as the list grows.
 function postWindow(db, clientId) {
-  const r = db.prepare('SELECT MIN(posted_on) AS a, MAX(posted_on) AS b, COUNT(*) AS n, COALESCE(SUM(views), 0) AS views FROM posts WHERE client_id = ? AND posted_on IS NOT NULL').get(clientId);
+  const r = db.prepare('SELECT MIN(posted_on) AS a, MAX(posted_on) AS b, SUM(uploads) AS n, COALESCE(SUM(views), 0) AS views FROM posts WHERE client_id = ? AND posted_on IS NOT NULL').get(clientId);
   if (!r.n) return null;
   return { from: `${r.a}T00:00:00.000Z`, to: new Date(Date.parse(`${r.b}T00:00:00.000Z`) + DAY).toISOString(), first: r.a, last: r.b, total: r.n, views: r.views };
 }
 // A post's day is compared at noon, so a period that starts at midnight never splits it.
 const postsBetween = (db, clientId, since, until) => db.prepare(
-  `SELECT COUNT(*) AS n FROM posts WHERE client_id = ? AND posted_on IS NOT NULL AND posted_on || 'T12:00:00.000Z' >= ? AND posted_on || 'T12:00:00.000Z' < ?`,
+  `SELECT COALESCE(SUM(uploads), 0) AS n FROM posts WHERE client_id = ? AND posted_on IS NOT NULL AND posted_on || 'T12:00:00.000Z' >= ? AND posted_on || 'T12:00:00.000Z' < ?`,
 ).get(clientId, since, until).n;
 
 function delivered(db, client, since, until = '9999') {
@@ -234,7 +234,8 @@ export function clientBoard(db, cfg, client, now = Date.now()) {
        AND (from_value IS NULL OR from_value NOT IN (${ph(AFTER_DELIVERY)})) GROUP BY card_id`,
   ).all(client.id, iso(now - 30 * DAY), ...AFTER_DELIVERY);
   // With a posts list, the chart shows real uploads on the days it covers and cards times their multiplier elsewhere.
-  const logged = postWindow(db, client.id);
+  // (A creator campaign's list is one row per account, not per day, so it stays out of the daily chart.)
+  const logged = client.kind === 'creators' ? null : postWindow(db, client.id);
   const perDay = {};
   for (const r of firstPosts) {
     const d = localDate(cfg.tz, new Date(r.at));
@@ -242,7 +243,7 @@ export function clientBoard(db, cfg, client, now = Date.now()) {
     perDay[d] = (perDay[d] || 0) + (logged ? client.count_multiplier || 1 : 1);
   }
   if (logged) {
-    for (const r of db.prepare('SELECT posted_on, COUNT(*) AS n FROM posts WHERE client_id = ? AND posted_on IS NOT NULL GROUP BY posted_on').all(client.id)) perDay[r.posted_on] = r.n;
+    for (const r of db.prepare('SELECT posted_on, SUM(uploads) AS n FROM posts WHERE client_id = ? AND posted_on IS NOT NULL GROUP BY posted_on').all(client.id)) perDay[r.posted_on] = r.n;
   }
   if (client.kind === 'creators') {
     const bumps = db.prepare(`SELECT at, from_value, to_value FROM events WHERE client_id = ? AND field = 'videos' AND at >= ? AND source IN ('sync', 'portal')`)
@@ -262,7 +263,7 @@ export function clientBoard(db, cfg, client, now = Date.now()) {
     cards: cards.filter((c) => c.status && !AFTER_DELIVERY.includes(c.status)).map(card),
     posted: cards.filter(wasPosted).sort(byDate('posted_date', -1)).slice(0, 40).map(card),
     daily,
-    posts: db.prepare('SELECT id, url, title, platform, account, posted_on, views, views_checked FROM posts WHERE client_id = ? ORDER BY posted_on DESC, id').all(client.id),
+    posts: db.prepare('SELECT id, url, title, platform, account, posted_on, views, views_checked, uploads FROM posts WHERE client_id = ? ORDER BY posted_on DESC, id').all(client.id),
     events: recentEvents(db, { clientId: client.id, limit: 40 }),
   };
 }
@@ -321,7 +322,7 @@ export function clientOverview(db, cfg, client, now = Date.now()) {
       period_start: pkg.period_start, period_end: pkg.period_end, days_left: pkg.days_left, days_since: pkg.days_since },
     delivered_30d: delivered(db, client, iso(now - 30 * DAY)),
     posts: (({ first, last, total, views } = {}) => (total ? { first, last, total, views } : null))(postWindow(db, client.id) || undefined),
-    post_list: db.prepare('SELECT id, url, title, platform, account, posted_on, views, views_checked FROM posts WHERE client_id = ? ORDER BY posted_on DESC, id').all(client.id),
+    post_list: db.prepare('SELECT id, url, title, platform, account, posted_on, views, views_checked, uploads FROM posts WHERE client_id = ? ORDER BY posted_on DESC, id').all(client.id),
   };
 }
 

@@ -90,7 +90,16 @@ const cinoPosts = [1, 1, 2, 3, 3, 4, 5].flatMap((d, i) => [
   postRow(`py${i}`, 'YouTube', '@elena', d, [3159, 8812, 1159, 20457, 1359, 1205, 25][i], `https://www.youtube.com/shorts/y${i}`, ['Should I go anyway?', 'Is this valid?', 'Is this okay?', 'Should they split?', 'What should I do?', 'Should women split the bill?', 'What would you do?'][i]),
   postRow(`pt${i}`, 'TikTok', i % 3 ? '@elena' : '@splitwithcino', d, 640 + i * 11, `https://www.tiktok.com/@elena/video/77${i}`, `TikTok ${i}`),
 ]);
+const acct = (id, name, handle, platform, n, views) => {
+  const row = postRow(id, platform, name, 1, views, `https://www.tiktok.com/@${handle}`, handle);
+  row.properties.Account = { type: 'rich_text', rich_text: [{ plain_text: name }] };
+  row.properties.Uploads = { type: 'number', number: n };
+  return row;
+};
+const raystonPosts = [acct('ra1', 'Maya Okafor', 'mayabuilds', 'TikTok', 7, 19713), acct('ra2', 'Maya Okafor', 'mayabuilds', 'Instagram', 9, 15121),
+  acct('ra3', 'Tom Reyes', 'tomsells', 'TikTok', 10, 4229), acct('ra4', 'Tom Reyes', 'tomsells', 'Facebook', 8, 336), acct('ra5', 'Ines Duarte', 'inesecom', 'Instagram', 6, 5192)];
 const boards = {
+  'rayston-posts': { schema: { Post: { type: 'title' }, Link: { type: 'url' }, 'Posted Date': { type: 'date' }, Platform: { type: 'select' }, Account: { type: 'rich_text' }, Views: { type: 'number' }, Uploads: { type: 'number' }, 'Views checked': { type: 'date' } }, pages: raystonPosts },
   'cino-posts': { schema: { Post: { type: 'title' }, Link: { type: 'url' }, 'Posted Date': { type: 'date' }, Platform: { type: 'select' }, Account: { type: 'select' }, Views: { type: 'number' }, 'Views checked': { type: 'date' } }, pages: cinoPosts },
   rayston: { schema: raystonSchema, pages: rayston },
   cino: { schema: schema({ who: 'Elena' }), pages: cino },
@@ -132,6 +141,8 @@ bump('y3', 2);
 for (const c of clients()) await syncClient(db, notion, c, iso(35));
 db.prepare("UPDATE clients SET posts_data_source_id = 'cino-posts' WHERE slug = 'cino'").run();
 await syncPosts(db, notion, clients().find((c) => c.slug === 'cino'));
+db.prepare("UPDATE clients SET posts_data_source_id = 'rayston-posts' WHERE slug = 'rayston'").run();
+await syncPosts(db, notion, clients().find((c) => c.slug === 'rayston'));
 db.prepare('INSERT INTO sync_runs (started_at, finished_at, ok, cards, events, detail) VALUES (?, ?, 1, ?, 0, ?)')
   .run(iso(2), iso(2), cino.length + raymond.length + noah.length, JSON.stringify(clients().map((c) => ({ client: c.slug, ok: true }))));
 const slack = db.prepare('INSERT INTO slack_status (client_id, channel_id, waiting, waiting_since, last_from, last_text, checked_at) VALUES (?, ?, ?, ?, ?, ?, ?)');

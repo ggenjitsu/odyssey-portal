@@ -128,13 +128,13 @@ export function syncPosts(db, notion, client, now = nowIso()) {
       const gone = db.prepare('SELECT notion_page_id FROM posts WHERE client_id = ?').all(client.id).filter((r) => !keep.has(r.notion_page_id));
       for (const r of gone) db.prepare('DELETE FROM posts WHERE notion_page_id = ?').run(r.notion_page_id);
       const put = db.prepare(
-        `INSERT INTO posts (client_id, notion_page_id, url, title, platform, account, posted_on, views, views_checked, notion_url, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO posts (client_id, notion_page_id, url, title, platform, account, posted_on, views, views_checked, notion_url, updated_at, uploads)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(notion_page_id) DO UPDATE SET client_id = excluded.client_id, url = excluded.url, title = excluded.title,
            platform = excluded.platform, account = excluded.account, posted_on = excluded.posted_on, views = excluded.views,
-           views_checked = excluded.views_checked, notion_url = excluded.notion_url, updated_at = excluded.updated_at`,
+           views_checked = excluded.views_checked, notion_url = excluded.notion_url, updated_at = excluded.updated_at, uploads = excluded.uploads`,
       );
-      for (const r of rows) put.run(client.id, r.notion_page_id, r.url, r.title, r.platform, r.account, r.posted_on, r.views, r.views_checked, r.notion_url, now);
+      for (const r of rows) put.run(client.id, r.notion_page_id, r.url, r.title, r.platform, r.account, r.posted_on, r.views, r.views_checked, r.notion_url, now, r.uploads);
       return { posts: rows.length };
     });
   });

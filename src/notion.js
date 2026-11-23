@@ -176,6 +176,7 @@ const POST_COLS = {
   platform: { names: ['Platform'], types: ['select', 'rich_text'] },
   account: { names: ['Account'], types: ['select', 'rich_text'] },
   views: { names: ['Views'], types: ['number'] },
+  uploads: { names: ['Uploads', 'Videos', 'Posts'], types: ['number'] },
   checked: { names: ['Views checked'], types: ['date'] },
 };
 
@@ -221,6 +222,7 @@ export function normalizePost(page, map) {
     account: get('account') || guess.account || null,
     posted_on: (get('date') || '').slice(0, 10) || null,
     views: views == null ? null : Math.round(views),
+    uploads: Math.max(1, Math.round(get('uploads') ?? 1)),
     views_checked: (get('checked') || '').slice(0, 10) || null,
     notion_url: page.url || null,
   };
