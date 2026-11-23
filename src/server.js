@@ -51,6 +51,19 @@ export async function buildServer({ db, cfg, notion = null, slack = null, stripe
     }
   });
 
+  const CSP = [
+    "default-src 'self'", "style-src 'self' https://fonts.googleapis.com", 'font-src https://fonts.gstatic.com',
+    "img-src 'self' data: https:", "media-src 'self' https: blob:", "connect-src 'self'",
+    "frame-ancestors 'none'", "base-uri 'self'", "form-action 'self'",
+  ].join('; ');
+  app.addHook('onSend', async (req, reply, payload) => {
+    reply.header('x-content-type-options', 'nosniff');
+    reply.header('referrer-policy', 'same-origin');
+    reply.header('x-frame-options', 'DENY');
+    if (!req.url.startsWith('/api/')) reply.header('content-security-policy', CSP);
+    return payload;
+  });
+
   app.setErrorHandler((err, req, reply) => {
     if (err.statusCode && err.statusCode < 500) return reply.code(err.statusCode).send({ error: err.message });
     req.log.error(err);
@@ -84,9 +97,24 @@ export async function buildServer({ db, cfg, notion = null, slack = null, stripe
     return { ...user, notion_user_id: match.id };
   }
 
+  // The footage behind the glass: what the client was given, else web/bg/<their-slug>.*, else the house default.
+  const bgDir = path.resolve('web/bg');
+  const bgFile = (name) => ['mp4', 'webm', 'jpg', 'png'].map((ext) => `${name}.${ext}`).find((f) => fs.existsSync(path.join(bgDir, f)));
+  function backgroundFor(client) {
+    if (client?.bg_video) return client.bg_video;
+    const own = client && bgFile(client.slug);
+    if (own) return `/bg/${own}`;
+    const fallback = bgFile('default');
+    return getSetting(db, 'default_bg_video', null) || (fallback ? `/bg/${fallback}` : null);
+  }
+
   const publicUser = (u) => {
     const client = u.client_id ? db.prepare('SELECT name, slug, bg_video FROM clients WHERE id = ?').get(u.client_id) : null;
-    return { id: u.id, email: u.email, name: u.name, role: u.role, client, linked_to_notion: u.role === 'editor' ? Boolean(u.notion_user_id) : undefined };
+    return {
+      id: u.id, email: u.email, name: u.name, role: u.role, client,
+      background: backgroundFor(client),
+      linked_to_notion: u.role === 'editor' ? Boolean(u.notion_user_id) : undefined,
+    };
   };
 
   // ---------- health and sign-in ----------
@@ -466,12 +494,14 @@ export async function buildServer({ db, cfg, notion = null, slack = null, stripe
     events: recentEvents(db, { clientId: Number(req.query.client_id) || null, limit: req.query.limit, before: Number(req.query.before) || null }),
   }));
 
-  // ---------- the web app (built later into web/dist) ----------
+  // ---------- the web app: plain files in web/, no build step ----------
 
-  const dist = path.resolve('web/dist');
-  if (fs.existsSync(path.join(dist, 'index.html'))) {
-    await app.register(fastifyStatic, { root: dist });
-    app.setNotFoundHandler((req, reply) => (req.url.startsWith('/api/') ? reply.code(404).send({ error: 'Not found' }) : reply.sendFile('index.html')));
+  const webRoot = path.resolve('web');
+  if (fs.existsSync(path.join(webRoot, 'index.html'))) {
+    await app.register(fastifyStatic, { root: webRoot, maxAge: 0 });
+    // Any other address (like /invite/abc) is a screen inside the app.
+    app.setNotFoundHandler((req, reply) =>
+      (req.url.startsWith('/api/') || req.method !== 'GET' ? reply.code(404).send({ error: 'Not found' }) : reply.sendFile('index.html')));
   } else {
     app.get('/', async () => ({ name: 'Odyssey Portal', status: 'The API is running. The web app has not been built yet' }));
   }

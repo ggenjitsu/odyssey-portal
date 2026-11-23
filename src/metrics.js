@@ -139,7 +139,7 @@ function reviewQueue(db) {
 }
 
 export function recentEvents(db, { clientId = null, limit = 50, before = null } = {}) {
-  const where = ["e.source != 'baseline'"];
+  const where = ["e.source IN ('sync', 'portal')"]; // what really happened since go-live, not the day-one estimates
   const args = [];
   if (clientId) {
     where.push('e.client_id = ?');

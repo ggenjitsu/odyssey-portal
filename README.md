@@ -67,6 +67,8 @@ All routes are under `/api`. Logins use a cookie. Changes must come from the por
 ## Layout
 
 ```
+web/             the screens: plain HTML, CSS and JS, no build step
+web/bg/          background footage. <client-slug>.mp4 or .jpg is that client's, default.* is everyone else's
 src/rules.js     stage names and the rules built on them
 src/notion.js    Notion client, column matching, card normaliser
 src/sync.js      pull, compare, log; portal write-back
@@ -75,6 +77,7 @@ src/server.js    logins, permissions, routes
 src/slack.js     waiting-on-a-reply check      src/stripe.js   billing snapshot
 src/jobs.js      schedule and daily backup     src/db.js       schema and migrations
 test/            sync and permission tests against a stand-in Notion
+scripts/         local preview with made-up data (dev-seed.js) and screenshots (shot.mjs)
 ```
 
 See `RUNBOOK.md` for deploying and running it.
