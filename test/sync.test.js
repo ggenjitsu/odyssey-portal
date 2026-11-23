@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { syncClient, applyCardChange } from '../src/sync.js';
+import { syncPosts, syncClient, applyCardChange } from '../src/sync.js';
 import { deliveredCount, adminOverview, editorOverview, clientOverview } from '../src/metrics.js';
 import { startOfDay, monthlyPeriod } from '../src/time.js';
 import { schema, page, fakeNotion, freshDb, client, events, KUNAL, SARA } from './helpers.js';
@@ -173,6 +173,82 @@ test('overviews: review queue, delivery counts, editor output, package pace and 
   db.prepare("UPDATE cards SET weight = 4 WHERE id = 'c2'").run();
   cino = adminOverview(db, CFG, now).clients[0];
   assert.deepEqual([cino.delivered_30d, cino.posted_30d, cino.package.delivered], [4, 1, 4]);
+});
+
+test('a creator campaign is tracked by stage and by its videos-posted number going up', async () => {
+  const opts = (names) => ({ options: names.map((name) => ({ name })) });
+  const creator = (id, name, stage, chase, posted) => ({
+    object: 'page', id, url: `https://notion.test/${id}`, created_time: T0, last_edited_time: T0, in_trash: false,
+    properties: {
+      Creator: { type: 'title', title: [{ plain_text: name }] },
+      Stage: { type: 'select', select: { name: stage } },
+      Chase: { type: 'select', select: chase ? { name: chase } : null },
+      'Videos posted': { type: 'number', number: posted },
+      'Next action': { type: 'rich_text', rich_text: [{ plain_text: 'Send brief' }] },
+    },
+  });
+  const boards = { ray: {
+    schema: {
+      Creator: { name: 'Creator', type: 'title', title: {} },
+      Stage: { name: 'Stage', type: 'select', select: opts(['Onboarding', 'Warm-up', 'Ready to post', 'Posting']) },
+      Chase: { name: 'Chase', type: 'select', select: opts(['Chase now', 'Nudge', 'On track']) },
+      'Videos posted': { name: 'Videos posted', type: 'number', number: {} },
+      'Next action': { name: 'Next action', type: 'rich_text', rich_text: {} },
+    },
+    pages: [creator('k1', 'Maya', 'Posting', 'On track', 4), creator('k2', 'Frank N.', 'Warm-up', 'Chase now', 0)],
+  } };
+  const { notion } = fakeNotion(boards);
+  const db = freshDb([{ slug: 'rayston', name: 'Rayston', ds: 'ray' }]);
+  db.prepare("UPDATE clients SET kind = 'creators' WHERE slug = 'rayston'").run();
+  await syncClient(db, notion, client(db, 'rayston'), T0);
+  boards.ray.pages[0].properties['Videos posted'].number = 6; // Maya posts two more
+  boards.ray.pages[1].properties.Stage.select.name = 'Ready to post';
+  boards.ray.pages[1].properties.Chase.select = { name: 'On track' };
+  await syncClient(db, notion, client(db, 'rayston'), T1);
+  assert.deepEqual(events(db, "source = 'sync'").map((e) => [e.card_title, e.field, e.from_value, e.to_value]), [
+    ['Maya', 'videos', '4', '6'], ['Frank N.', 'status', 'Warm-up', 'Ready to post'], ['Frank N.', 'chase', 'Chase now', 'On track'],
+  ]);
+  const ray = adminOverview(db, CFG, Date.parse('2026-11-23T10:00:00.000Z')).clients[0];
+  assert.deepEqual([ray.kind, ray.delivered_7d, ray.creators.total, ray.creators.posting, ray.creators.chase_now, ray.creators.videos_total], ['creators', 2, 2, 1, 0, 6]);
+  assert.deepEqual(ray.stages, ['Onboarding', 'Warm-up', 'Ready to post', 'Posting']);
+  // Counting from the last invoice: no deadline, just how many since.
+  db.prepare("UPDATE clients SET package_size = 10, last_invoiced_at = '2026-11-20' WHERE slug = 'rayston'").run();
+  const p = adminOverview(db, CFG, Date.parse('2026-11-23T10:00:00.000Z')).clients[0].package;
+  assert.deepEqual([p.period_source, p.delivered, p.remaining, p.pace, p.days_since], ['invoice', 2, 8, 'open', 3]);
+});
+
+test('a posts list is mirrored from Notion and replaces the estimate on the days it covers', async () => {
+  const post = (id, d, views, link, extra = {}) => ({
+    object: 'page', id, url: `https://notion.test/${id}`, created_time: T0, last_edited_time: T0, in_trash: false,
+    properties: { Post: { type: 'title', title: [{ plain_text: id }] }, Link: { type: 'url', url: link }, 'Posted Date': { type: 'date', date: { start: d } },
+      Views: { type: 'number', number: views }, ...extra },
+  });
+  const boards = {
+    cino: { schema: schema(), pages: [page('a', { status: 'Ready' }), page('b', { status: 'Ready' })] },
+    log: { schema: { Post: { type: 'title' }, Link: { type: 'url' }, 'Posted Date': { type: 'date' }, Views: { type: 'number' }, Platform: { type: 'select' } }, pages: [
+      post('p1', '2026-11-20', 100, 'https://www.instagram.com/elena/reel/abc/'),
+      post('p2', '2026-11-20', 2000, 'https://www.youtube.com/shorts/xyz', { Platform: { type: 'select', select: { name: 'YouTube' } } }),
+      post('p3', '2026-11-21', 650, 'https://www.tiktok.com/@splitwithcino/video/1'),
+    ] },
+  };
+  const { notion } = fakeNotion(boards);
+  const db = freshDb([{ slug: 'cino', name: 'Cino', ds: 'cino' }]);
+  db.prepare("UPDATE clients SET count_multiplier = 3, posts_data_source_id = 'log' WHERE slug = 'cino'").run();
+  await syncClient(db, notion, client(db, 'cino'), '2026-11-10T09:00:00.000Z');
+  boards.cino.pages[0].properties.Status.status = { name: 'Posted' }; // before the log starts: an estimate, times 3
+  await syncClient(db, notion, client(db, 'cino'), '2026-11-12T09:00:00.000Z');
+  boards.cino.pages[1].properties.Status.status = { name: 'Posted' }; // inside the logged days: the uploads count instead
+  await syncClient(db, notion, client(db, 'cino'), '2026-11-20T15:00:00.000Z');
+  await syncPosts(db, notion, client(db, 'cino'));
+  const rows = db.prepare('SELECT platform, account, views FROM posts ORDER BY notion_page_id').all().map((r) => [r.platform, r.account, r.views]);
+  assert.deepEqual(rows, [['Instagram', '@elena', 100], ['YouTube', null, 2000], ['TikTok', '@splitwithcino', 650]]);
+  const now = Date.parse('2026-11-23T10:00:00.000Z');
+  const c = adminOverview(db, CFG, now).clients[0];
+  assert.deepEqual([c.package.delivered, c.posts.total, c.posts.views, c.posts.first, c.posts.last], [6, 3, 2750, '2026-11-20', '2026-11-21']);
+  boards.log.pages.pop(); // a row deleted in Notion goes here too
+  await syncPosts(db, notion, client(db, 'cino'));
+  assert.equal(adminOverview(db, CFG, now).clients[0].package.delivered, 5);
+  assert.equal(clientOverview(db, CFG, client(db, 'cino'), now).posts.views, 2100);
 });
 
 test('time helpers handle time zones and short months', () => {

@@ -3,7 +3,7 @@
 
 const app = document.getElementById('app');
 const state = { user: null, overview: null, client: null, board: null, editor: null, people: null, clientList: null, channels: undefined,
-  sendBack: null, form: null, invite: null, busy: new Set(), entered: false };
+  sendBack: null, form: null, invite: null, settings: null, undo: null, busy: new Set(), entered: false };
 
 // ---------- helpers ----------
 
@@ -84,22 +84,91 @@ function ago(iso) {
 const clock = (iso, tz) => new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: tz }).format(new Date(iso));
 const dayShort = (iso, tz) => new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', timeZone: tz }).format(new Date(iso));
 
+// ---------- the picture behind the glass ----------
+
+const isVideo = (src) => /\.(mp4|webm|mov)(\?|$)/i.test(src);
+const stillOf = (src) => (isVideo(src) ? src.replace(/\.\w+(\?.*)?$/, '.jpg') : src);
+const bgSrc = (url) => safeUrl(url) || (String(url || '').startsWith('/bg/') ? url : null);
+const reduced = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+const footage = new Map(); // videos already buffering, by address
+const warmed = new Set();
+
+function videoFor(src) {
+  if (!footage.has(src)) {
+    const v = h('video', { src, loop: true, playsinline: true, preload: 'auto' });
+    v.muted = true;
+    footage.set(src, v);
+  }
+  return footage.get(src);
+}
+
+// Fetch a picture's still ahead of time, and on real intent start buffering its footage, so it is
+// already there when the portal opens.
+function warm(url, withFootage) {
+  const src = bgSrc(url);
+  if (!src) return;
+  if (!warmed.has(src)) {
+    warmed.add(src);
+    new Image().src = stillOf(src);
+  }
+  if (withFootage && isVideo(src) && !reduced() && !navigator.connection?.saveData) videoFor(src);
+}
+
+// Each picture is a layer: its still shows first, the footage fades in over it once it plays, and
+// the new layer fades in over the old one. Nothing ever cuts to black.
 function setBackdrop(url) {
   const el = document.getElementById('backdrop');
-  const src = safeUrl(url) || (String(url || '').startsWith('/bg/') ? url : null);
+  const src = bgSrc(url);
   if (el.dataset.src === (src || '')) return;
   el.dataset.src = src || '';
-  el.replaceChildren();
-  if (!src) return;
-  if (/\.(mp4|webm|mov)(\?|$)/i.test(src)) {
-    // A still of the same name shows while the video loads.
-    const v = h('video', { src, poster: src.replace(/\.\w+(\?.*)?$/, '.jpg'), autoplay: true, loop: true, playsinline: true, preload: 'auto' });
-    v.muted = true;
-    el.append(v);
-  } else {
-    el.append(h('img', { src, alt: '' }));
+  const old = [...el.children];
+  const retire = () => old.forEach((o) => {
+    o.querySelector('video')?.pause();
+    o.remove();
+  });
+  if (!src) return retire();
+  const layer = h('div', { class: old.length ? 'layer' : 'layer is-first' });
+  const still = h('img', { src: stillOf(src), alt: '', decoding: 'async' });
+  layer.append(still);
+  if (isVideo(src) && !reduced()) {
+    const v = videoFor(src);
+    const on = () => v.classList.add('is-on');
+    if (v.readyState >= 3 && !v.paused) on();
+    else v.addEventListener('playing', on, { once: true });
+    layer.append(v);
+    v.play().catch(() => {});
   }
+  let shown = false;
+  const show = () => {
+    if (shown) return;
+    shown = true;
+    layer.classList.add('is-on');
+    setTimeout(retire, old.length ? 760 : 0);
+  };
+  if (still.complete && still.naturalWidth) show();
+  else {
+    still.addEventListener('load', show, { once: true });
+    still.addEventListener('error', show, { once: true });
+    setTimeout(show, 1200);
+  }
+  el.append(layer);
+  try { localStorage.setItem('ody_bg', src); } catch { /* storage can be off */ }
 }
+
+// Client names and "Open portal" open that client's board. Their picture starts fading in on the click,
+// before the data is back. A modified click still opens a new tab.
+const portalLink = (c) => ({
+  href: `/client/${c.slug}`,
+  onclick: (e) => {
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.button) return;
+    e.preventDefault();
+    if (c.background) setBackdrop(c.background);
+    go(`/client/${c.slug}`);
+  },
+  onpointerenter: () => warm(c.background, true),
+  onfocus: () => warm(c.background, true),
+});
 
 // ---------- sign in ----------
 
@@ -176,6 +245,7 @@ function topbar(right) {
       h('button', { class: 'btn btn-quiet', type: 'button', 'aria-label': 'Sign out', title: 'Sign out',
         onclick: async () => {
           await api('/auth/logout', { method: 'POST' }).catch(() => {});
+          try { localStorage.removeItem('ody_bg'); } catch { /* storage can be off */ }
           Object.assign(state, { user: null, overview: null, client: null, board: null, editor: null, people: null, clientList: null, invite: null, form: null });
           history.replaceState(null, '', '/');
           render();
@@ -183,8 +253,13 @@ function topbar(right) {
 }
 
 function page(...sections) {
-  const el = h('main', { class: state.entered ? 'page' : 'page enter' }, sections);
+  const entering = !state.entered;
+  const el = h('main', { class: entering ? 'page enter' : 'page' }, sections);
   state.entered = true;
+  if (entering) {
+    // Each block rises a beat after the one before it.
+    [...el.querySelectorAll('.page-head, .glass')].forEach((node, i) => node.style.setProperty('--n', Math.min(i, 12)));
+  }
   return el;
 }
 
@@ -193,11 +268,54 @@ function page(...sections) {
 const STAGES = ['Idea', 'Scripting', 'Filming', 'Ready to Edit', 'Editing', 'Revisions', 'Review', 'Ready'];
 const slug = (s) => s.toLowerCase().replace(/\s+/g, '-');
 
+const num = (n) => Number(n || 0).toLocaleString('en-GB');
+
 function stat(label, figure, note, waiting) {
   return h('div', { class: `stat glass${waiting && figure > 0 ? ' is-waiting' : ''}` },
     h('div', { class: 'stat-label' }, label),
-    h('div', { class: 'stat-figure' }, pad(figure)),
+    h('div', { class: 'stat-figure' }, figure >= 100 ? num(figure) : pad(figure)),
     h('div', { class: 'stat-note' }, note));
+}
+
+// The two numbers that matter most lead every client page: views, and how much went out.
+function headline(o) {
+  const p = o.package || {};
+  const posted = stat('Videos posted', p.delivered ?? 0, p.size ? `of ${rangeOf(p)} ${periodWords(p)}` : periodWords(p));
+  return o.posts
+    ? [stat('Views', o.posts.views, `on ${plural(o.posts.total, 'upload')}, ${dateUtc(o.posts.first)} to ${dateUtc(o.posts.last)}`), posted]
+    : [posted, stat('Last 30 days', o.delivered_30d ?? 0, 'videos posted')];
+}
+
+// Every upload with its views, from the client's "Posted links" list in Notion.
+function postsPanel(posts) {
+  if (!posts?.length) return null;
+  const byViews = state.postSort === 'views';
+  const rows = [...posts].sort((a, z) => (byViews ? 0 : String(z.posted_on).localeCompare(String(a.posted_on))) || (z.views || 0) - (a.views || 0));
+  const accounts = [...new Set(posts.map((p) => p.account || 'Other'))];
+  const platforms = [...new Set(posts.map((p) => p.platform || 'Other'))];
+  const views = (list) => list.reduce((n, p) => n + (p.views || 0), 0);
+  const checked = posts.map((p) => p.views_checked).filter(Boolean).sort().pop();
+  const tally = (list) => h('div', { class: 'tally' }, h('b', {}, num(views(list))), h('small', {}, plural(list.length, 'upload')));
+  const table = h('div', { class: 'tallies' },
+    h('span', {}), platforms.map((pl) => h('span', { class: 'th' }, pl)), h('span', { class: 'th' }, 'All'),
+    accounts.map((a) => {
+      const mine = posts.filter((p) => (p.account || 'Other') === a);
+      return [h('i', { class: 'rule' }), h('span', { class: 'acct' }, a), platforms.map((pl) => tally(mine.filter((p) => (p.platform || 'Other') === pl))), tally(mine)];
+    }));
+  table.style.gridTemplateColumns = `minmax(0, 1.4fr) repeat(${platforms.length + 1}, minmax(0, 1fr))`;
+  const sortBy = (key, label) => h('button', { class: 'btn btn-quiet btn-sm', type: 'button', 'aria-pressed': String((state.postSort || 'date') === key),
+    onclick: () => { state.postSort = key; render(); } }, label);
+  const row = (p) => h('a', { class: 'row post', href: safeUrl(p.url), target: '_blank', rel: 'noopener' },
+    h('time', {}, p.posted_on ? dateUtc(p.posted_on) : ''),
+    h('span', { class: 'post-where' }, p.platform || ''),
+    h('span', { class: 'post-acct' }, p.account || '', p.title && !/^(reel|tiktok)\b/i.test(p.title) && h('small', {}, p.title)),
+    h('b', { class: 'post-views' }, num(p.views)),
+    h('span', { class: 'link' }, 'Open', icon('out')));
+  return h('section', { class: 'panel glass' },
+    h('div', { class: 'panel-head' }, h('h2', {}, 'Views'), h('p', {}, `${num(views(posts))} views on ${plural(posts.length, 'upload')}${checked ? `, counted ${dateUtc(checked)}` : ''}`)),
+    table,
+    h('div', { class: 'panel-head' }, h('h2', {}, 'Every upload'), h('div', { class: 'actions' }, sortBy('date', 'Newest'), sortBy('views', 'Most viewed'))),
+    h('div', { class: 'rows post-list' }, rows.map(row)));
 }
 
 async function act(key, fn) {
@@ -249,54 +367,79 @@ function reviewRow(c) {
   return row;
 }
 
-function track(byStatus) {
-  const live = STAGES.filter((s) => byStatus[s]);
-  if (!live.length) return h('div', {}, h('div', { class: 'track is-empty' }), h('div', { class: 'legend' }, 'Nothing in production'));
+const stageSeg = (s) => `seg-${slug(s)}`;
+const creatorSeg = (s) => (/^posting/i.test(s) ? 'seg-ready' : /ready/i.test(s) ? 'seg-near' : /warm/i.test(s) ? 'seg-editing'
+  : /onboard/i.test(s) ? 'seg-ready-to-edit' : /paused|silent/i.test(s) ? 'seg-review' : 'seg-idle');
+
+function track(byStatus, stages = STAGES, seg = stageSeg, hot = (s) => s === 'Review', empty = 'Nothing in production') {
+  const live = stages.filter((s) => byStatus[s]);
+  if (!live.length) return h('div', {}, h('div', { class: 'track is-empty' }), h('div', { class: 'legend' }, empty));
   const bar = h('div', { class: 'track', role: 'img', 'aria-label': live.map((s) => `${sentence(s)} ${byStatus[s]}`).join(', ') });
   for (const s of live) {
-    const seg = h('span', { class: `seg seg-${slug(s)}`, title: `${sentence(s)}: ${byStatus[s]}` });
-    seg.style.flexGrow = String(byStatus[s]);
-    bar.append(seg);
+    const part = h('span', { class: `seg ${seg(s)}`, title: `${sentence(s)}: ${byStatus[s]}` });
+    part.style.flexGrow = String(byStatus[s]);
+    bar.append(part);
   }
   return h('div', {}, bar,
     h('div', { class: 'legend' }, live.map((s) =>
-      h('span', { class: `legend-item${s === 'Review' ? ' is-accent' : ''}` }, h('i', { class: `seg seg-${slug(s)}` }), sentence(s), h('b', {}, byStatus[s])))));
+      h('span', { class: `legend-item${hot(s) ? ' is-accent' : ''}` }, h('i', { class: `seg ${seg(s)}` }), sentence(s), h('b', {}, byStatus[s])))));
 }
 
-function packageCell(p, countsAs) {
-  if (!p.size) return h('div', { class: 'package' }, h('div', { class: 'small' }, 'No package set'));
-  const range = p.max && p.max !== p.size ? `${p.size} to ${p.max}` : `${p.size}`;
-  const pace = p.pace === 'behind' ? h('span', { class: 'pace-behind' }, `${p.expected - p.delivered} behind pace`)
-    : p.pace === 'complete' ? h('span', { class: 'pace-ok' }, 'Package met')
-    : h('span', { class: 'pace-ok' }, 'On pace');
+const rangeOf = (p) => (p.max && p.max !== p.size ? `${p.size} to ${p.max}` : `${p.size}`);
+const dateUtc = (d) => new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' }).format(new Date(d));
+// What the count runs from: the last invoice once one is marked, the calendar month until then.
+const periodWords = (p) => (p.period_source === 'invoice' ? `since the ${dateUtc(p.period_start)} invoice`
+  : p.period_source === 'stripe' ? `this billing period, ${plural(p.days_left, 'day')} left`
+  : `this month, ${plural(p.days_left, 'day')} left`);
+
+function packageCell(c) {
+  const p = c.package;
+  if (!p.size) return h('div', { class: 'package' },
+    h('div', { class: 'package-line' }, h('strong', {}, p.delivered), ' posted'),
+    h('div', { class: 'small' }, `${periodWords(p)}, no package set`));
+  const done = p.delivered >= p.size;
   const fill = h('i');
   fill.style.width = `${Math.min(100, (p.delivered / p.size) * 100)}%`;
-  return h('div', { class: 'package' },
-    h('div', { class: 'package-line' }, h('strong', {}, p.delivered), ` of ${range} posted`),
+  return h('div', { class: `package${done ? ' is-done' : ''}` },
+    h('div', { class: 'package-line' }, h('strong', {}, p.delivered), ` of ${rangeOf(p)} posted`),
     h('div', { class: 'bar' }, fill),
-    h('div', { class: 'small' }, pace, `, ${plural(p.days_left, 'day')} left`, countsAs > 1 ? `, counts ×${countsAs}` : ''));
+    h('div', { class: 'small' }, done ? h('span', { class: 'pace-due' }, 'Package done, send the invoice') : `${p.remaining} to go ${periodWords(p)}`));
 }
 
 function clientRow(c) {
   const waiting = c.slack?.waiting;
+  const name = h('a', { class: 'client-name', title: `Open ${c.name}'s portal`, ...portalLink(c) }, c.name);
+  const slackLine = h('div', { class: 'small waiting' },
+    c.slack ? h('i', { class: `dot ${waiting ? 'dot-wait' : 'dot-ok'}` }) : null,
+    !c.slack ? 'Slack channel not linked'
+      : c.slack.error ? 'Slack check failed'
+      : waiting ? `${c.slack.last_from || 'Client'} waiting ${span(c.slack.waiting_since)}`
+      : 'Slack answered');
+  if (c.kind === 'creators') {
+    const k = c.creators;
+    return h('div', { class: 'row client' },
+      h('div', {}, name, h('div', { class: 'small' }, c.synced ? `${plural(k.total, 'creator')}, ${plural(k.videos_total, 'video')} so far` : 'Not synced yet')),
+      track(c.by_status, c.stages?.length ? c.stages : Object.keys(c.by_status), creatorSeg, (s) => /paused|silent/i.test(s), 'No creators on the tracker yet'),
+      packageCell(c),
+      h('div', {},
+        h('div', {}, h('strong', { class: 'client-name' }, k.posting), ' posting'),
+        h('div', { class: 'small' }, `${k.ready} ready to post`)),
+      h('div', {},
+        h('div', {}, k.chase_now ? `${k.chase_now} to chase now` : 'Nobody to chase'),
+        slackLine));
+  }
   return h('div', { class: 'row client' },
-    h('div', {},
-      h('a', { class: 'client-name', href: `/client/${c.slug}`, title: `Open ${c.name}'s tracking board`, onclick: nav(`/client/${c.slug}`) }, c.name),
+    h('div', {}, name,
       h('div', { class: 'small' }, c.synced ? `${c.in_production} in production` : 'Not synced yet',
         c.overdue > 0 && h('span', { class: 'pace-behind' }, `, ${c.overdue} overdue`))),
     track(c.by_status),
-    packageCell(c.package, c.counts_as),
+    packageCell(c),
     h('div', {},
       h('div', {}, h('strong', { class: 'client-name' }, c.ready), ' ready to post'),
       h('div', { class: 'small' }, !c.ready ? 'Nothing banked' : c.runway_days == null ? 'No posting pace yet' : `About ${plural(Math.max(1, Math.round(c.runway_days)), 'day')} banked`)),
     h('div', {},
       h('div', {}, c.needs_approval ? `${c.needs_approval} with the client` : 'Nothing with the client'),
-      h('div', { class: 'small waiting' },
-        c.slack ? h('i', { class: `dot ${waiting ? 'dot-wait' : 'dot-ok'}` }) : null,
-        !c.slack ? 'Slack channel not linked'
-          : c.slack.error ? 'Slack check failed'
-          : waiting ? `${c.slack.last_from || 'Client'} waiting ${span(c.slack.waiting_since)}`
-          : 'Slack answered')));
+      slackLine));
 }
 
 function eventRow(e, tz) {
@@ -304,6 +447,8 @@ function eventRow(e, tz) {
   const what = e.field === 'status' ? [h('span', {}, `${sentence(e.from_value) || 'New'} to `), sentence(e.to_value)]
     : e.field === 'approval' ? [h('span', {}, 'Approval: '), e.to_value || 'cleared']
     : e.field === 'editor' ? [h('span', {}, 'Editor: '), e.to_value || 'unassigned']
+    : e.field === 'videos' ? [h('span', {}, 'Videos posted: '), `${e.from_value} to ${e.to_value}`]
+    : e.field === 'chase' ? [h('span', {}, 'Chase: '), e.to_value || 'cleared']
     : e.field === 'created' ? [h('span', {}, 'New card in '), sentence(e.to_value) || 'the board']
     : e.field === 'removed' ? ['Removed from the board']
     : ['Back on the board'];
@@ -318,7 +463,9 @@ function adminView(o) {
   const t = o.totals;
   const tz = o.timezone;
   const [weekday, ...rest] = new Intl.DateTimeFormat('en-GB', { weekday: 'long', day: 'numeric', month: 'long', timeZone: tz }).format(new Date()).replace(',', '').split(' ');
-  const total = o.clients.reduce((n, c) => n + c.total, 0);
+  const videos = o.clients.filter((c) => c.kind !== 'creators').reduce((n, c) => n + c.total, 0);
+  const creators = o.clients.reduce((n, c) => n + (c.creators?.total || 0), 0);
+  o.clients.forEach((c) => warm(c.background));
   const sync = o.last_sync;
   const maxDone = Math.max(1, ...o.editors.map((e) => e.done_7d));
   const syncing = state.busy.has('sync');
@@ -331,7 +478,7 @@ function adminView(o) {
       h('div', { class: 'page-head' },
         h('div', {},
           h('h1', { class: 'title' }, `${weekday} `, h('span', {}, rest.join(' '))),
-          h('p', { class: 'sub' }, `${plural(total, 'video')} across ${plural(o.clients.length, 'client')}`, t.overdue ? `, ${t.overdue} overdue` : '')),
+          h('p', { class: 'sub' }, `${plural(videos, 'video')}${creators ? ` and ${plural(creators, 'creator')}` : ''} across ${plural(o.clients.length, 'client')}`, t.overdue ? `, ${t.overdue} overdue` : '')),
         h('button', { class: 'btn', type: 'button', disabled: syncing,
           onclick: () => act('sync', () => api('/admin/sync', { method: 'POST' })) }, icon('refresh'), syncing ? 'Syncing' : 'Sync now')),
 
@@ -357,7 +504,7 @@ function adminView(o) {
           })) : h('p', { class: 'empty' }, 'No editor is set on any card yet'))),
 
       h('section', { class: 'panel glass' },
-        h('div', { class: 'panel-head' }, h('h2', {}, 'Clients'), h('p', {}, 'Pipeline, package this period, and who is waiting')),
+        h('div', { class: 'panel-head' }, h('h2', {}, 'Clients'), h('p', {}, 'Pipeline, package, and who is waiting')),
         h('div', { class: 'rows' }, o.clients.map(clientRow))),
 
       h('section', { class: 'panel glass' },
@@ -410,8 +557,7 @@ function videoRow(c, meta, actions, form, extra) {
 // ---------- client ----------
 
 function clientView(o, preview) {
-  const p = o.package;
-  const range = p && (p.max && p.max !== p.size ? `${p.size} to ${p.max}` : `${p.size}`);
+  const p = o.package || {};
   const isOpen = (c, kind) => state.form?.id === c.id && state.form.kind === kind;
   const open = (c, kind) => { state.form = { id: c.id, kind, note: '', url: '', date: todayIso() }; render(); };
 
@@ -463,12 +609,12 @@ function clientView(o, preview) {
     page(
       h('div', { class: 'page-head' }, h('div', {},
         h('h1', { class: 'title' }, o.client.name),
-        h('p', { class: 'sub' }, p ? `${p.delivered} of ${range} posted this period, ${plural(p.days_left, 'day')} left` : `${plural(o.in_production, 'video')} in production`))),
+        h('p', { class: 'sub' }, `${plural(o.in_production, 'video')} in production`, o.changes_requested.length ? `, ${o.changes_requested.length} being reworked` : ''))),
       h('section', { class: 'stats', 'aria-label': 'Your videos' },
+        headline(o),
         stat('Needs your approval', o.needs_approval.length, 'watch, then approve or ask for changes', true),
-        stat('Being reworked', o.changes_requested.length, 'changes you asked for'),
-        stat('Ready to post', o.ready.length, 'approved and waiting to go out'),
-        stat('In production', o.in_production, 'scripting, filming or editing')),
+        stat('Ready to post', o.ready.length, 'approved and waiting to go out')),
+      postsPanel(o.post_list),
       panel('Needs your approval', null, list(o.needs_approval, approvalRow, 'Nothing needs you right now')),
       h('div', { class: 'cols' },
         panel('Ready to post', 'Tell us when one goes out', list(o.ready, readyRow, 'Nothing is waiting to go out')),
@@ -594,9 +740,7 @@ function peopleView() {
 
   return h('div', {}, topbar(),
     page(
-      h('div', { class: 'page-head' }, h('div', {},
-        h('h1', { class: 'title' }, 'People'),
-        h('p', { class: 'sub' }, 'Founders see everything. Editors see their own queue. Clients see their own videos'))),
+      h('div', { class: 'page-head' }, h('div', {}, h('h1', { class: 'title' }, 'People'))),
       panel('Add someone', 'They get a link and choose their own password', add),
       panel('Everyone with a login', null, h('div', { class: 'rows' }, users.map(personRow)))));
 }
@@ -605,48 +749,87 @@ function peopleView() {
 
 function clientsView() {
   const channels = state.channels;
+  const sums = new Map((state.overview?.clients || []).map((c) => [c.slug, c]));
   const num = (name, value, extra = {}) => h('input', { class: 'input input-sm', name, type: 'number', min: 0, value: value ?? '', ...extra });
-  const row = (c) => h('form', { class: 'row client-form',
-    onsubmit: (e) => {
-      e.preventDefault();
-      const f = Object.fromEntries(new FormData(e.target));
-      const day = Number(f.day);
-      send(() => api(`/admin/clients/${c.id}`, { method: 'PATCH', body: {
-        package_size: f.package_size, package_max: f.package_max || f.package_size, count_multiplier: Number(f.count_multiplier) || 1,
-        period_anchor: day >= 1 && day <= 31 ? `2026-01-${pad(day)}` : null,
-        ...(channels ? { slack_channel_id: f.slack_channel_id || null } : {}),
-      } }), `${c.name} saved`);
-    } },
-    h('div', {},
-      h('div', { class: 'client-name' }, c.name),
-      h('a', { class: 'link', href: `/client/${c.slug}/preview`, onclick: nav(`/client/${c.slug}/preview`) }, 'See their portal', icon('out'))),
-    field('Package from', num('package_size', c.package_size)),
-    field('to', num('package_max', c.package_max)),
-    field('Counts as', num('count_multiplier', c.count_multiplier, { min: 0.5, max: 20, step: 0.5 })),
-    field('Starts on day', num('day', c.period_anchor ? Number(c.period_anchor.slice(8, 10)) : '', { min: 1, max: 31, placeholder: '1' })),
-    field('Slack channel', channels
-      ? h('select', { class: 'input input-sm', name: 'slack_channel_id' },
-        h('option', { value: '' }, 'Not linked'),
-        channels.map((ch) => h('option', { value: ch.id, selected: ch.id === c.slack_channel_id }, `#${ch.name}${ch.member ? '' : ' (invite the bot first)'}`)))
-      : h('input', { class: 'input input-sm', disabled: true, value: 'Slack is not connected' })),
-    h('button', { class: 'btn', type: 'submit' }, 'Save'));
+  const mini = (label, value, note) => h('div', { class: 'mini' }, h('span', {}, label), h('b', {}, value), note && h('small', {}, note));
 
-  const add = h('form', { class: 'form-grid',
-    onsubmit: (e) => {
-      e.preventDefault();
-      send(() => api('/admin/clients', { method: 'POST', body: Object.fromEntries(new FormData(e.target)) }), 'Client added. Their board syncs within a minute');
-    } },
-    field('Client name', h('input', { class: 'input input-sm', name: 'name', autocomplete: 'off', required: true })),
-    field('Link to their Notion board', h('input', { class: 'input input-sm', name: 'notion', type: 'url', autocomplete: 'off', required: true })),
-    h('button', { class: 'btn btn-primary', type: 'submit' }, icon('plus'), 'Add client'));
+  const card = (c) => {
+    const s = sums.get(c.slug) || { slug: c.slug, name: c.name, kind: c.kind, package: {} };
+    const p = s.package || {};
+    const creators = c.kind === 'creators';
+    const what = creators ? 'creator videos' : 'videos';
+    const done = Boolean(p.size) && p.delivered >= p.size;
+    const channel = channels?.find((ch) => ch.id === c.slack_channel_id);
+    const fill = h('i');
+    fill.style.width = `${p.size ? Math.min(100, (p.delivered / p.size) * 100) : 0}%`;
+    const save = (body, after, said) => send(async () => {
+      await api(`/admin/clients/${c.id}`, { method: 'PATCH', body });
+      after?.();
+    }, said);
+
+    const settings = state.settings === c.id && h('form', { class: 'bill-form',
+      onsubmit: (e) => {
+        e.preventDefault();
+        const f = Object.fromEntries(new FormData(e.target));
+        save({
+          package_size: f.package_size, package_max: f.package_max || f.package_size, count_multiplier: Number(f.count_multiplier) || 1,
+          last_invoiced_at: f.last_invoiced_at || null,
+          ...(channels ? { slack_channel_id: f.slack_channel_id || null } : {}),
+        }, () => { state.settings = null; }, `${c.name} saved`);
+      } },
+      field('Package from', num('package_size', c.package_size)),
+      field('to', num('package_max', c.package_max)),
+      field('Each post counts as', num('count_multiplier', c.count_multiplier, { min: 0.5, max: 20, step: 0.5 })),
+      field('Last invoice', h('input', { class: 'input input-sm', name: 'last_invoiced_at', type: 'date', max: todayIso(), value: c.last_invoiced_at || '' })),
+      field('Slack channel', channels
+        ? h('select', { class: 'input input-sm', name: 'slack_channel_id' },
+          h('option', { value: '' }, 'Not linked'),
+          channels.map((ch) => h('option', { value: ch.id, selected: ch.id === c.slack_channel_id }, `#${ch.name}${ch.member ? '' : ' (invite the bot first)'}`)))
+        : h('input', { class: 'input input-sm', disabled: true, value: 'Slack is not connected' })),
+      h('div', { class: 'actions' },
+        h('button', { class: 'btn btn-primary', type: 'submit' }, 'Save'),
+        h('button', { class: 'btn btn-quiet', type: 'button', onclick: () => { state.settings = null; render(); } }, 'Close')));
+
+    return h('section', { class: `bill glass${done ? ' is-done' : ''}` },
+      h('div', { class: 'bill-head' },
+        h('a', { class: 'bill-name', ...portalLink(s) }, c.name),
+        h('a', { class: 'link link-go', ...portalLink(s) }, 'Open portal')),
+      h('div', { class: 'bill-count' },
+        h('b', {}, p.delivered ?? 0),
+        h('span', {}, p.size ? `of ${rangeOf(p)} ${what} posted` : `${what} posted`)),
+      h('div', { class: 'bar meter' }, fill),
+      h('div', { class: 'bill-line' },
+        h('span', { class: 'bill-status' }, !p.size ? 'No package set' : done ? 'Package done. Send the invoice' : `${p.remaining} to go`),
+        h('span', { class: 'small' }, p.period_source === 'invoice'
+          ? `Last invoice ${dateUtc(p.period_start)} (${p.days_since ? `${p.days_since}d ago` : 'today'})`
+          : p.period_source === 'stripe' ? `Stripe period, ${plural(p.days_left, 'day')} left`
+          : `No invoice marked yet, counting this month (${plural(p.days_left ?? 0, 'day')} left)`)),
+      h('div', { class: 'minis' },
+        mini('Last 7 days', s.delivered_7d ?? 0),
+        mini('Last 30 days', s.delivered_30d ?? 0),
+        creators ? mini('Posting now', s.creators?.posting ?? 0, `of ${plural(s.creators?.total ?? 0, 'creator')}`) : mini('In review', s.needs_review ?? 0),
+        creators ? mini('To chase', s.creators?.chase_now ?? 0)
+          : mini('Banked', s.ready ?? 0, s.ready && s.runway_days != null ? `about ${plural(Math.max(1, Math.round(s.runway_days)), 'day')}` : null)),
+      h('div', { class: 'bill-foot' },
+        h('span', { class: 'small' }, channel ? `Watching #${channel.name}` : c.slack_channel_id ? 'Slack channel linked' : 'Slack channel not linked',
+          s.posts ? `, counted from ${plural(s.posts.total, 'logged upload')}` : !creators && c.count_multiplier > 1 ? `, each video counts as ${c.count_multiplier}` : ''),
+        h('div', { class: 'actions' },
+          state.undo?.id === c.id && h('button', { class: 'btn btn-quiet', type: 'button',
+            onclick: () => save({ last_invoiced_at: state.undo.prev }, () => { state.undo = null; }, 'Put back') }, 'Undo'),
+          h('button', { class: 'btn', type: 'button',
+            onclick: () => {
+              const prev = c.last_invoiced_at || null;
+              save({ last_invoiced_at: todayIso() }, () => { state.undo = { id: c.id, prev }; }, `${c.name} marked as invoiced. The count starts again from today`);
+            } }, icon('check'), 'Mark invoiced today'),
+          h('button', { class: 'btn btn-quiet', type: 'button', 'aria-expanded': String(state.settings === c.id),
+            onclick: () => { state.settings = state.settings === c.id ? null : c.id; render(); } }, 'Settings'))),
+      settings);
+  };
 
   return h('div', {}, topbar(),
     page(
-      h('div', { class: 'page-head' }, h('div', {},
-        h('h1', { class: 'title' }, 'Clients'),
-        h('p', { class: 'sub' }, 'Package size, how posts are counted, and which Slack channel to watch'))),
-      panel('Your clients', 'Posted videos count toward the package', h('div', { class: 'rows' }, state.clientList.map(row))),
-      panel('Add a client', 'Share their board with the Odyssey Portal connection in Notion first', add)));
+      h('div', { class: 'page-head' }, h('div', {}, h('h1', { class: 'title' }, 'Clients'))),
+      h('div', { class: 'bills' }, state.clientList.map(card))));
 }
 
 // ---------- admin: one client's tracking board ----------
@@ -659,17 +842,98 @@ function postedChart(daily) {
       daily.map((d, i) => {
         const bar = h('i', { class: d.posted ? '' : 'is-zero', title: `${dateShort(d.date)}: ${d.posted} posted` });
         bar.style.height = d.posted ? `${Math.max(8, (d.posted / max) * 100)}%` : '2px';
-        return h('div', { class: `chart-col${i === daily.length - 1 ? ' is-today' : ''}` }, bar);
+        const col = h('div', { class: `chart-col${i === daily.length - 1 ? ' is-today' : ''}` }, bar);
+        col.style.setProperty('--i', i);
+        return col;
       })),
     h('div', { class: 'chart-axis small' }, h('span', {}, dateShort(daily[0].date)), h('span', {}, dateShort(daily[14].date)), h('span', {}, 'Today')));
 }
 
+const fact = (label, value) => h('div', { class: 'fact' }, h('span', {}, label), h('b', {}, value));
+
+function packagePanel(c) {
+  const p = c.package;
+  const range = p.size ? rangeOf(p) : null;
+  const done = range && p.delivered >= p.size;
+  const videos = c.kind !== 'creators';
+  return panel('Package',
+    p.period_source === 'stripe' ? 'Period from Stripe' : p.period_source === 'invoice' ? `Counting since the ${dateUtc(p.period_start)} invoice` : 'Counting this month, no invoice marked yet',
+    h('div', { class: 'facts' },
+      fact('Posted', range ? `${p.delivered} of ${range}` : p.delivered),
+      range ? fact(done ? 'Package' : 'Still to post', done ? 'Done, send the invoice' : p.remaining) : fact('Package', 'Not set'),
+      range && p.expected != null && fact('Should be at by today', p.expected),
+      p.days_left != null ? fact('Days left', p.days_left) : fact('Days since the invoice', p.days_since),
+      c.posts && fact('Uploads logged', `${c.posts.total}, ${dateUtc(c.posts.first)} to ${dateUtc(c.posts.last)}`),
+      videos && fact(c.posts ? 'A video counts as, on days not logged' : 'Each post counts as', c.counts_as),
+      videos && fact('Finished and banked', c.ready),
+      videos && fact('Runway', !c.ready ? 'Nothing banked' : c.runway_days == null ? 'No posting pace yet' : `About ${plural(Math.max(1, Math.round(c.runway_days)), 'day')}`)));
+}
+
+// A creator campaign: one row per creator, moving through stages, counted by their videos-posted number.
+function creatorsBoard(b) {
+  const c = b.client;
+  const k = c.creators;
+  const stages = c.stages?.length ? c.stages : [...new Set(b.cards.map((x) => x.status).filter(Boolean))];
+  const link = (card, cls, kids) => {
+    const url = safeUrl(card.notion_url);
+    return h(url ? 'a' : 'div', { class: cls, href: url, target: url && '_blank', rel: url && 'noopener', title: card.title }, kids);
+  };
+  const tile = (card) => {
+    const x = card.extra || {};
+    const chase = x.chase && x.chase !== 'On track' ? x.chase.toLowerCase() : null;
+    return link(card, `tile${x.chase === 'Chase now' ? ' is-chase' : ''}`, [
+      h('span', { class: 'tile-title' }, card.title),
+      h('small', {}, [`${x.videos_posted || 0} posted`, chase, x.owner].filter(Boolean).join(' · '))]);
+  };
+  const column = (stage) => {
+    const items = b.cards.filter((x) => x.status === stage);
+    return h('div', { class: 'col' },
+      h('div', { class: 'col-head' }, h('span', {}, sentence(stage)), h('b', {}, items.length)),
+      h('div', { class: 'col-cards' }, items.map(tile)));
+  };
+  const rank = { 'Chase now': 0, Nudge: 1 };
+  const toChase = b.cards.filter((x) => x.extra?.chase in rank)
+    .sort((a, z) => rank[a.extra.chase] - rank[z.extra.chase] || String(a.extra.last_activity || '').localeCompare(String(z.extra.last_activity || '')));
+  const chaseRow = (card) => {
+    const x = card.extra;
+    return link(card, 'row chase', [
+      h('div', {},
+        h('div', { class: 'client-name' }, card.title),
+        h('div', { class: 'small' }, [sentence(card.status), `${x.videos_posted || 0} posted`, x.owner].filter(Boolean).join(' · '))),
+      h('div', {},
+        h('div', { class: x.chase === 'Chase now' ? 'chase-now' : '' }, x.chase),
+        h('div', { class: 'small' }, x.last_activity ? `Last active ${dateShort(x.last_activity)}` : 'No activity logged')),
+      h('div', { class: 'chase-note' }, x.next_action || x.blockers || x.last_activity_note || '')]);
+  };
+
+  return h('div', {}, topbar(),
+    page(
+      h('div', { class: 'page-head' },
+        h('div', {},
+          h('h1', { class: 'title' }, c.name),
+          h('p', { class: 'sub' }, `${plural(k.total, 'creator')}, ${plural(k.videos_total, 'video')} posted so far`))),
+
+      h('section', { class: 'stats', 'aria-label': c.name },
+        stat('Posting', k.posting, 'creators live right now'),
+        stat('Ready to post', k.ready, 'set up, not posting yet'),
+        stat('Chase now', k.chase_now, k.nudge ? `${k.nudge} more to nudge` : 'nobody else to nudge', true),
+        stat('Videos posted', k.videos_total, `${c.delivered_7d} in the last 7 days`)),
+
+      panel('Creators', 'Every creator, by stage. Click one to open it in Notion',
+        h('div', { class: 'board' }, stages.map(column))),
+
+      h('div', { class: 'cols' },
+        panel('Videos posted per day', 'Last 30 days, from the creators\' counts going up', postedChart(b.daily)),
+        packagePanel(c)),
+
+      panel('To chase', 'Chase now first, then nudges, longest quiet first', list(toChase, chaseRow, 'Nobody needs chasing')),
+      panel('Activity', `Every change logged for ${c.name}`, list(b.events, (e) => eventRow(e, b.timezone), 'Changes show up here as the tracker moves in Notion'))));
+}
+
 function boardView(b) {
   const c = b.client;
-  const p = c.package;
+  if (c.kind === 'creators') return creatorsBoard(b);
   const today = todayIso();
-  const range = p.size ? (p.max && p.max !== p.size ? `${p.size} to ${p.max}` : `${p.size}`) : null;
-  const fact = (label, value) => h('div', { class: 'fact' }, h('span', {}, label), h('b', {}, value));
   const tile = (card) => {
     const overdue = card.due_date && card.due_date.slice(0, 10) < today;
     const bits = [card.editor_names || 'No editor', card.due_date && `due ${dateShort(card.due_date)}`, card.in_stage_since && `here ${span(card.in_stage_since)}`].filter(Boolean);
@@ -696,29 +960,22 @@ function boardView(b) {
       h('div', { class: 'page-head' },
         h('div', {},
           h('h1', { class: 'title' }, c.name),
-          h('p', { class: 'sub' }, `${c.in_production} in production`, range ? `, ${p.delivered} of ${range} posted this period` : '', c.overdue ? `, ${c.overdue} overdue` : '')),
+          h('p', { class: 'sub' }, `${c.in_production} in production`, c.overdue ? `, ${c.overdue} overdue` : '')),
         h('a', { class: 'btn', href: `/client/${c.slug}/preview`, onclick: nav(`/client/${c.slug}/preview`) }, 'See what they see', icon('out'))),
 
       h('section', { class: 'stats', 'aria-label': c.name },
+        headline(c),
         stat('Needs your review', c.needs_review, 'before the client sees it', true),
-        stat('With the client', c.needs_approval, 'waiting for approval'),
-        stat('Ready to post', c.ready, 'finished, not out yet'),
-        stat('Posted', c.posted_30d, 'videos in the last 30 days')),
-
-      panel('Pipeline', 'Every video in production, by stage. Click one to open it in Notion',
-        h('div', { class: 'board' }, STAGES.map(column))),
+        stat('Ready to post', c.ready, c.needs_approval ? `${c.needs_approval} more with the client` : 'finished, not out yet')),
 
       h('div', { class: 'cols' },
         panel('Posted per day', 'Last 30 days', postedChart(b.daily)),
-        panel('Package', p.period_source === 'stripe' ? 'Period from Stripe' : p.period_source === 'anchor' ? 'Period from your start day' : 'Calendar month',
-          h('div', { class: 'facts' },
-            range ? fact('Posted this period', `${p.delivered} of ${range}`) : fact('Package', 'Not set'),
-            range && fact('Should be at by today', p.expected),
-            range && fact('Still to post', p.remaining),
-            fact('Days left', p.days_left),
-            fact('Each post counts as', c.counts_as),
-            fact('Finished and banked', c.ready),
-            fact('Runway', !c.ready ? 'Nothing banked' : c.runway_days == null ? 'No posting pace yet' : `About ${plural(Math.max(1, Math.round(c.runway_days)), 'day')}`)))),
+        packagePanel(c)),
+
+      postsPanel(b.posts),
+
+      panel('Pipeline', 'Every video in production, by stage. Click one to open it in Notion',
+        h('div', { class: 'board' }, STAGES.map(column))),
 
       panel('Posted', 'Most recent first', list(b.posted, postedRow, 'Nothing posted yet')),
       panel('Activity', `Every change logged for ${c.name}`, list(b.events, (e) => eventRow(e, b.timezone), 'Changes show up here as cards move in Notion'))));
@@ -729,10 +986,18 @@ function boardView(b) {
 function route() {
   return location.pathname.replace(/\/+$/, '') || '/';
 }
-function go(path) {
+// Changing page: what is on screen fades out while the next page's data loads, then the new page fades in.
+let leaving = false;
+async function go(path) {
   history.pushState(null, '', path);
-  Object.assign(state, { form: null, sendBack: null, invite: null });
-  load().then(render);
+  Object.assign(state, { form: null, sendBack: null, invite: null, settings: null, undo: null, entered: false });
+  leaving = true;
+  if (!reduced()) app.classList.add('is-leaving');
+  await Promise.all([load(), reduced() ? null : wait(140)]);
+  app.classList.remove('is-leaving');
+  leaving = false;
+  window.scrollTo(0, 0);
+  render();
 }
 function nav(path) {
   return (e) => {
@@ -740,7 +1005,10 @@ function nav(path) {
     go(path);
   };
 }
-window.addEventListener('popstate', () => load().then(render));
+window.addEventListener('popstate', () => {
+  state.entered = false;
+  load().then(render);
+});
 
 // Fetch what the current screen needs.
 async function load() {
@@ -757,7 +1025,8 @@ async function load() {
         state.people = await api('/admin/users');
         state.clientList = (await api('/admin/clients')).clients;
       } else if (r === '/clients') {
-        state.clientList = (await api('/admin/clients')).clients;
+        // The cards need both the settings rows and the counted numbers.
+        [state.clientList, state.overview] = await Promise.all([api('/admin/clients').then((x) => x.clients), api('/admin/overview')]);
         if (state.channels === undefined) state.channels = await api('/admin/slack/channels').then((x) => x.channels, () => null);
       } else state.overview = await api('/admin/overview');
     } else if (u.role === 'client') state.client = await api('/client/overview');
@@ -797,6 +1066,8 @@ async function start() {
   render();
 }
 
+// Show the last picture straight away, before the first answer from the server.
+try { setBackdrop(localStorage.getItem('ody_bg') || '/bg/default.mp4'); } catch { setBackdrop('/bg/default.mp4'); }
 try {
   state.user = (await api('/me')).user;
 } catch {
@@ -806,7 +1077,7 @@ await start();
 
 // Keep the numbers fresh without interrupting someone who is typing or filling in a form.
 setInterval(async () => {
-  if (!state.user || state.sendBack || state.form || state.busy.size || document.hidden || ['/people', '/clients'].includes(route())) return;
+  if (!state.user || leaving || state.sendBack || state.form || state.busy.size || document.hidden || ['/people', '/clients'].includes(route())) return;
   await load();
   render();
 }, 60_000);

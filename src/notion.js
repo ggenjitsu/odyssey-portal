@@ -95,7 +95,7 @@ export function createNotion({ token, version = '2025-09-03', fetchImpl = fetch,
 // Which board column feeds each portal field. First name that exists with an accepted type wins,
 // so a board can rename "Person" to "Editor" and nothing breaks.
 const CANDIDATES = {
-  status: { names: ['Status'], types: ['status', 'select'] },
+  status: { names: ['Status', 'Stage'], types: ['status', 'select'] },
   approval: { names: ['Approval'], types: ['select', 'status'] },
   editor: { names: ['Editor', 'Person', 'Assignee'], types: ['people'] },
   priority: { names: ['Priority'], types: ['select'] },
@@ -113,12 +113,24 @@ const CANDIDATES = {
   weight: { names: ['Accounts Posted', 'Accounts', 'Post Count', 'Counts As'], types: ['number'] },
 };
 
+// Extra columns a creator campaign board carries (one row per creator, not per video).
+const EXTRA = {
+  chase: { names: ['Chase'], types: ['select'] },
+  videos_posted: { names: ['Videos posted'], types: ['number'] },
+  owner: { names: ['Owner'], types: ['rich_text'] },
+  next_action: { names: ['Next action'], types: ['rich_text'] },
+  blockers: { names: ['Blockers'], types: ['rich_text'] },
+  last_activity: { names: ['Last activity'], types: ['date'] },
+  last_activity_note: { names: ['Last activity note'], types: ['rich_text'] },
+  handles: { names: ['Handles'], types: ['rich_text'] },
+};
+
 export function resolvePropMap(schemaProps = {}) {
   const entries = Object.entries(schemaProps);
   const map = {};
   const title = entries.find(([, p]) => p.type === 'title');
   if (title) map.title = { name: title[0], type: 'title' };
-  for (const [key, cand] of Object.entries(CANDIDATES)) {
+  for (const [key, cand] of Object.entries({ ...CANDIDATES, ...EXTRA })) {
     for (const want of cand.names) {
       const hit = entries.find(([name, p]) => name.trim().toLowerCase() === want.toLowerCase() && cand.types.includes(p.type));
       if (hit) {
@@ -157,11 +169,69 @@ function read(prop) {
   }
 }
 
+// A "Posted links" list: one row per upload, with its link, day, account, platform and views.
+const POST_COLS = {
+  link: { names: ['Link', 'Post link', 'URL', 'Posted Video Link'], types: ['url'] },
+  date: { names: ['Posted Date', 'Date', 'Posted'], types: ['date'] },
+  platform: { names: ['Platform'], types: ['select', 'rich_text'] },
+  account: { names: ['Account'], types: ['select', 'rich_text'] },
+  views: { names: ['Views'], types: ['number'] },
+  checked: { names: ['Views checked'], types: ['date'] },
+};
+
+export function resolvePostMap(schemaProps = {}) {
+  const entries = Object.entries(schemaProps);
+  const map = {};
+  const title = entries.find(([, p]) => p.type === 'title');
+  if (title) map.title = { name: title[0], type: 'title' };
+  for (const [key, cand] of Object.entries(POST_COLS)) {
+    for (const want of cand.names) {
+      const hit = entries.find(([name, p]) => name.trim().toLowerCase() === want.toLowerCase() && cand.types.includes(p.type));
+      if (hit) {
+        map[key] = { name: hit[0], type: hit[1].type };
+        break;
+      }
+    }
+  }
+  return map;
+}
+
+// What a link alone says about where it was posted, for rows where nobody filled that in.
+export function guessPost(url) {
+  let u;
+  try { u = new URL(url); } catch { return {}; }
+  const host = u.hostname.replace(/^(www|m|vm)\./, '');
+  const first = u.pathname.split('/').filter(Boolean)[0] || '';
+  if (host === 'instagram.com') return { platform: 'Instagram', account: /^(reel|reels|p|tv)$/.test(first) || !first ? null : `@${first}` };
+  if (host === 'tiktok.com') return { platform: 'TikTok', account: first.startsWith('@') ? first : null };
+  if (host === 'youtube.com' || host === 'youtu.be') return { platform: 'YouTube', account: first.startsWith('@') ? first : null };
+  return {};
+}
+
+export function normalizePost(page, map) {
+  const get = (key) => (map[key] ? read(page.properties?.[map[key].name]) : null);
+  const url = get('link');
+  const guess = guessPost(url);
+  const views = get('views');
+  return {
+    notion_page_id: page.id,
+    url,
+    title: get('title'),
+    platform: get('platform') || guess.platform || null,
+    account: get('account') || guess.account || null,
+    posted_on: (get('date') || '').slice(0, 10) || null,
+    views: views == null ? null : Math.round(views),
+    views_checked: (get('checked') || '').slice(0, 10) || null,
+    notion_url: page.url || null,
+  };
+}
+
 // A Notion page as the flat card the portal stores.
 export function normalizePage(page, map) {
   const get = (key) => (map[key] ? read(page.properties?.[map[key].name]) : null);
   const people = [...(get('editor') || [])].sort((a, b) => a.id.localeCompare(b.id));
   const approvalRaw = get('approval');
+  const extra = Object.fromEntries(Object.keys(EXTRA).map((k) => [k, get(k)]).filter(([, v]) => v != null && v !== ''));
   return {
     id: page.id,
     title: get('title') || 'Untitled',
@@ -182,6 +252,7 @@ export function normalizePage(page, map) {
     delay_reason: get('delay_reason'),
     file_count: (get('files') || []).length,
     weight: get('weight'),
+    extra: Object.keys(extra).length ? JSON.stringify(extra) : null,
     notion_url: page.url || null,
     created_at: page.created_time || null,
     last_edited_at: page.last_edited_time || null,

@@ -10,14 +10,23 @@ import { createStripe } from './stripe.js';
 export async function boot(cfg, log = console) {
   const db = openDb(cfg.dataDir === ':memory:' ? ':memory:' : path.join(cfg.dataDir, 'portal.sqlite3'));
 
-  // First run: load the known client boards.
-  if (!db.prepare('SELECT 1 FROM clients LIMIT 1').get()) {
-    const seedFile = path.resolve('seed/clients.json');
-    const seed = fs.existsSync(seedFile) ? JSON.parse(fs.readFileSync(seedFile, 'utf8')) : [];
-    const insert = db.prepare(
-      'INSERT INTO clients (slug, name, notion_data_source_id, notion_url, package_size, package_max, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-    );
-    for (const c of seed) insert.run(c.slug, c.name, c.notion_data_source_id ?? null, c.notion_url ?? null, c.package_size ?? null, c.package_max ?? null, nowIso());
+  // The clients in seed/clients.json always exist, in that order. Anything a founder has since edited
+  // in the portal (package, Slack channel, invoice date) is left alone.
+  const seedFile = path.resolve('seed/clients.json');
+  const seed = fs.existsSync(seedFile) ? JSON.parse(fs.readFileSync(seedFile, 'utf8')) : [];
+  for (const [i, c] of seed.entries()) {
+    const row = db.prepare('SELECT id FROM clients WHERE slug = ?').get(c.slug)
+      || (c.notion_data_source_id && db.prepare('SELECT id FROM clients WHERE notion_data_source_id = ?').get(c.notion_data_source_id));
+    if (row) {
+      db.prepare('UPDATE clients SET sort_order = ?, kind = ?, posts_data_source_id = COALESCE(posts_data_source_id, ?) WHERE id = ?')
+        .run(i + 1, c.kind || 'videos', c.posts_data_source_id ?? null, row.id);
+    } else {
+      db.prepare(
+        `INSERT INTO clients (slug, name, notion_data_source_id, notion_url, package_size, package_max, kind, sort_order, posts_data_source_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(c.slug, c.name, c.notion_data_source_id ?? null, c.notion_url ?? null, c.package_size ?? null, c.package_max ?? null, c.kind || 'videos', i + 1,
+        c.posts_data_source_id ?? null, nowIso());
+    }
   }
 
   // The owner's login comes from the environment and always works while those two settings are there.

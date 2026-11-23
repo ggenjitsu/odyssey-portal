@@ -130,6 +130,7 @@ export async function buildServer({ db, cfg, notion = null, slack = null, stripe
       boards_ok: run ? run.detail.filter((r) => r.ok).length : 0,
       cards: run?.cards ?? 0,
       problems: run ? run.detail.filter((r) => !r.ok).map((r) => r.reason || 'other') : [],
+      posts: db.prepare('SELECT COUNT(*) AS n FROM posts').get().n,
       // False means nobody can sign in yet: ADMIN_EMAIL or ADMIN_PASSWORD is missing or the password is under 10 characters.
       founder_login_ready: Boolean(db.prepare("SELECT 1 FROM users WHERE role = 'admin' AND active = 1 AND password_hash IS NOT NULL LIMIT 1").get()),
       notion: Boolean(notion), slack: Boolean(slack), stripe: Boolean(stripe),
@@ -172,7 +173,12 @@ export async function buildServer({ db, cfg, notion = null, slack = null, stripe
 
   // ---------- the three views ----------
 
-  app.get('/api/admin/overview', admin, async () => adminOverview(db, cfg));
+  app.get('/api/admin/overview', admin, async () => {
+    const out = adminOverview(db, cfg);
+    const rows = new Map(db.prepare('SELECT slug, bg_video FROM clients').all().map((r) => [r.slug, r]));
+    for (const c of out.clients) c.background = backgroundFor(rows.get(c.slug));
+    return out;
+  });
 
   app.get('/api/client/overview', { preHandler: need('client', 'admin') }, async (req, reply) => {
     // An admin can preview any client's portal with ?client=slug. A client only ever gets their own.
@@ -317,7 +323,7 @@ export async function buildServer({ db, cfg, notion = null, slack = null, stripe
 
   // ---------- admin: clients ----------
 
-  const CLIENT_FIELDS = ['name', 'slug', 'slack_channel_id', 'stripe_customer_id', 'package_size', 'package_max', 'count_multiplier', 'period_anchor', 'bg_video', 'active'];
+  const CLIENT_FIELDS = ['name', 'slug', 'slack_channel_id', 'stripe_customer_id', 'package_size', 'package_max', 'count_multiplier', 'period_anchor', 'last_invoiced_at', 'bg_video', 'active'];
 
   function cleanClient(body) {
     const out = {};
@@ -331,7 +337,7 @@ export async function buildServer({ db, cfg, notion = null, slack = null, stripe
       else v = v === null || v === '' ? null : String(v).trim();
       if (k.startsWith('package_') && Number.isNaN(v)) throw Object.assign(new Error('Package size must be a number'), { statusCode: 400 });
       if (k === 'count_multiplier' && !(v > 0 && v <= 20)) throw Object.assign(new Error('Counts-as must be a number between 0 and 20'), { statusCode: 400 });
-      if (k === 'period_anchor' && v && !/^\d{4}-\d{2}-\d{2}$/.test(v)) throw Object.assign(new Error('Use a date like 2026-11-01'), { statusCode: 400 });
+      if ((k === 'period_anchor' || k === 'last_invoiced_at') && v && !/^\d{4}-\d{2}-\d{2}$/.test(v)) throw Object.assign(new Error('Use a date like 2026-11-01'), { statusCode: 400 });
       if ((k === 'name' || k === 'slug') && !v) throw Object.assign(new Error(`A client needs a ${k}`), { statusCode: 400 });
       out[k] = v;
     }
@@ -341,7 +347,7 @@ export async function buildServer({ db, cfg, notion = null, slack = null, stripe
   app.get('/api/admin/clients', admin, async () => ({
     clients: db.prepare(
       `SELECT id, slug, name, notion_data_source_id, notion_url, slack_channel_id, stripe_customer_id, package_size, package_max, count_multiplier, period_anchor,
-              bg_video, active, baseline_at FROM clients ORDER BY name`,
+              last_invoiced_at, kind, bg_video, active, baseline_at FROM clients ORDER BY sort_order, name`,
     ).all(),
   }));
 
@@ -508,7 +514,14 @@ export async function buildServer({ db, cfg, notion = null, slack = null, stripe
 
   const webRoot = path.resolve('web');
   if (fs.existsSync(path.join(webRoot, 'index.html'))) {
-    await app.register(fastifyStatic, { root: webRoot, maxAge: 0 });
+    await app.register(fastifyStatic, {
+      root: webRoot,
+      maxAge: 0,
+      // Background footage rarely changes, so browsers keep it for a week and it shows at once on the next visit.
+      setHeaders: (res, file) => {
+        if (file.includes(`${path.sep}bg${path.sep}`)) res.setHeader('cache-control', 'public, max-age=604800');
+      },
+    });
     // Any other address (like /invite/abc) is a screen inside the app.
     app.setNotFoundHandler((req, reply) =>
       (req.url.startsWith('/api/') || req.method !== 'GET' ? reply.code(404).send({ error: 'Not found' }) : reply.sendFile('index.html')));

@@ -74,7 +74,24 @@ export function createSlack({ token, fetchImpl = fetch }) {
   };
 }
 
+// A client with no channel picked gets one automatically when exactly one channel the bot has been
+// invited to carries the client's name, e.g. #cino-odyssey for Cino. Inviting the bot is all it takes.
+let lastAutoLink = 0;
+async function autoLink(db, slack) {
+  const open = db.prepare("SELECT id, slug FROM clients WHERE active = 1 AND (slack_channel_id IS NULL OR slack_channel_id = '')").all();
+  if (!open.length || Date.now() - lastAutoLink < 10 * 60_000) return;
+  lastAutoLink = Date.now();
+  const taken = new Set(db.prepare('SELECT slack_channel_id FROM clients WHERE slack_channel_id IS NOT NULL').all().map((r) => r.slack_channel_id));
+  const channels = (await slack.channels()).filter((ch) => ch.member && !taken.has(ch.id));
+  for (const c of open) {
+    const key = c.slug.split('-')[0];
+    const hits = channels.filter((ch) => ch.name.toLowerCase().includes(key));
+    if (hits.length === 1) db.prepare('UPDATE clients SET slack_channel_id = ? WHERE id = ?').run(hits[0].id, c.id);
+  }
+}
+
 export async function refreshSlack(db, slack) {
+  await autoLink(db, slack).catch(() => {});
   const teamOverride = getSetting(db, 'slack_team_user_ids');
   const clients = db.prepare("SELECT id, slack_channel_id FROM clients WHERE active = 1 AND slack_channel_id IS NOT NULL AND slack_channel_id != ''").all();
   const save = db.prepare(

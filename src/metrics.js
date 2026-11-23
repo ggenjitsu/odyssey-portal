@@ -20,6 +20,35 @@ export function deliveredCount(db, clientId, since, until = '9999') {
   return Math.round(n * 10) / 10;
 }
 
+// Creator campaigns count videos from the "Videos posted" number on each creator's row going up.
+function videosDelta(db, clientId, since, until = '9999') {
+  const rows = db.prepare(
+    `SELECT from_value, to_value FROM events WHERE client_id = ? AND field = 'videos' AND at >= ? AND at < ? AND source IN ('sync', 'portal')`,
+  ).all(clientId, since, until);
+  return Math.max(0, rows.reduce((n, r) => n + (Number(r.to_value) || 0) - (Number(r.from_value) || 0), 0));
+}
+// A client with a "Posted links" list is counted from it for the days the list covers: every upload is one.
+// Outside those days the count is still Notion cards times their multiplier, so the estimate gives way to
+// the real number as the list grows.
+function postWindow(db, clientId) {
+  const r = db.prepare('SELECT MIN(posted_on) AS a, MAX(posted_on) AS b, COUNT(*) AS n, COALESCE(SUM(views), 0) AS views FROM posts WHERE client_id = ? AND posted_on IS NOT NULL').get(clientId);
+  if (!r.n) return null;
+  return { from: `${r.a}T00:00:00.000Z`, to: new Date(Date.parse(`${r.b}T00:00:00.000Z`) + DAY).toISOString(), first: r.a, last: r.b, total: r.n, views: r.views };
+}
+// A post's day is compared at noon, so a period that starts at midnight never splits it.
+const postsBetween = (db, clientId, since, until) => db.prepare(
+  `SELECT COUNT(*) AS n FROM posts WHERE client_id = ? AND posted_on IS NOT NULL AND posted_on || 'T12:00:00.000Z' >= ? AND posted_on || 'T12:00:00.000Z' < ?`,
+).get(clientId, since, until).n;
+
+function delivered(db, client, since, until = '9999') {
+  if (client.kind === 'creators') return videosDelta(db, client.id, since, until);
+  const w = postWindow(db, client.id);
+  if (!w) return deliveredCount(db, client.id, since, until);
+  const before = since < w.from ? deliveredCount(db, client.id, since, until < w.from ? until : w.from) : 0;
+  const after = until > w.to ? deliveredCount(db, client.id, since > w.to ? since : w.to, until) : 0;
+  return before + after + postsBetween(db, client.id, since, until);
+}
+
 function postedCount(db, clientId, since) {
   return db.prepare(
     `SELECT COUNT(DISTINCT card_id) AS n FROM events
@@ -27,11 +56,13 @@ function postedCount(db, clientId, since) {
   ).get(clientId, since).n;
 }
 
-// The billing period a client is in: Stripe's if we have it, else their anchor day, else the calendar month.
+// The billing period a client is in: Stripe's if we have it, else everything since the last invoice,
+// else their anchor day, else the calendar month.
 export function billingPeriod(client, billing, now) {
   if (billing?.period_start && billing?.period_end && billing.period_end > iso(now)) {
     return { start: billing.period_start, end: billing.period_end, source: 'stripe' };
   }
+  if (client.last_invoiced_at) return { start: `${client.last_invoiced_at.slice(0, 10)}T00:00:00.000Z`, end: null, source: 'invoice' };
   const day = client.period_anchor ? Number(client.period_anchor.slice(8, 10)) : 1;
   const { start, end } = monthlyPeriod(day || 1, new Date(now));
   return { start: iso(start), end: iso(end), source: client.period_anchor ? 'anchor' : 'calendar' };
@@ -39,17 +70,36 @@ export function billingPeriod(client, billing, now) {
 
 export function packageProgress(db, client, billing, now) {
   const period = billingPeriod(client, billing, now);
-  const delivered = deliveredCount(db, client.id, period.start, period.end);
-  const out = { size: client.package_size ?? null, max: client.package_max ?? client.package_size ?? null, delivered, period_start: period.start, period_end: period.end, period_source: period.source };
-  out.days_left = Math.max(0, Math.ceil((Date.parse(period.end) - now) / DAY));
-  if (client.package_size) {
-    const elapsed = Math.min(1, Math.max(0, (now - Date.parse(period.start)) / (Date.parse(period.end) - Date.parse(period.start))));
-    out.expected = Math.round(client.package_size * elapsed);
-    out.remaining = Math.max(0, client.package_size - delivered);
-    out.remaining_to_max = Math.max(0, out.max - delivered);
-    out.pace = delivered >= client.package_size ? 'complete' : delivered >= out.expected ? 'on_track' : 'behind';
+  const done = delivered(db, client, period.start, period.end || '9999');
+  const size = client.package_size || null;
+  const out = { size, max: client.package_max ?? size, delivered: done, period_start: period.start, period_end: period.end, period_source: period.source };
+  if (period.end) out.days_left = Math.max(0, Math.ceil((Date.parse(period.end) - now) / DAY));
+  else out.days_since = Math.max(0, Math.floor((now - Date.parse(period.start)) / DAY));
+  if (size) {
+    out.remaining = Math.max(0, size - done);
+    out.remaining_to_max = Math.max(0, out.max - done);
+    if (period.end) {
+      const elapsed = Math.min(1, Math.max(0, (now - Date.parse(period.start)) / (Date.parse(period.end) - Date.parse(period.start))));
+      out.expected = Math.round(size * elapsed);
+      out.pace = done >= size ? 'complete' : done >= out.expected ? 'on_track' : 'behind';
+    } else {
+      // Counting from the last invoice has no deadline: the package is either done or it has some to go.
+      out.pace = done >= size ? 'complete' : 'open';
+    }
   }
   return out;
+}
+
+function creatorTotals(cards, byStage) {
+  const rows = cards.map((c) => JSON.parse(c.extra || '{}'));
+  return {
+    total: cards.length,
+    posting: byStage.Posting || 0,
+    ready: byStage['Ready to post'] || 0,
+    chase_now: rows.filter((x) => x.chase === 'Chase now').length,
+    nudge: rows.filter((x) => x.chase === 'Nudge').length,
+    videos_total: rows.reduce((n, x) => n + (Number(x.videos_posted) || 0), 0),
+  };
 }
 
 function clientSummary(db, cfg, client, now) {
@@ -66,7 +116,13 @@ function clientSummary(db, cfg, client, now) {
     id: client.id,
     slug: client.slug,
     name: client.name,
+    kind: client.kind || 'videos',
+    sort_order: client.sort_order,
+    last_invoiced_at: client.last_invoiced_at || null,
+    stages: client.kind === 'creators' ? JSON.parse(client.prop_map || '{}').status?.options || [] : null,
+    creators: client.kind === 'creators' ? creatorTotals(cards, by_status) : null,
     counts_as: client.count_multiplier,
+    posts: (({ first, last, total, views } = {}) => (total ? { first, last, total, views } : null))(postWindow(db, client.id) || undefined),
     synced: Boolean(client.baseline_at),
     live_since: client.baseline_at,
     total: cards.length,
@@ -77,8 +133,8 @@ function clientSummary(db, cfg, client, now) {
     changes_requested: cards.filter(changesRequested).length,
     ready,
     overdue: cards.filter((c) => c.due_date && c.due_date.slice(0, 10) < today && !FINISHED.includes(c.status)).length,
-    delivered_7d: deliveredCount(db, client.id, iso(now - 7 * DAY)),
-    delivered_30d: deliveredCount(db, client.id, iso(now - 30 * DAY)),
+    delivered_7d: delivered(db, client, iso(now - 7 * DAY)),
+    delivered_30d: delivered(db, client, iso(now - 30 * DAY)),
     posted_30d: posted30,
     // Days of finished videos in the bank at the pace they have been posting.
     runway_days: posted30 > 0 ? Math.round((ready / (posted30 / 30)) * 10) / 10 : null,
@@ -170,16 +226,31 @@ export function clientBoard(db, cfg, client, now = Date.now()) {
     id: c.id, title: c.title, status: c.status, approval: c.approval, editor_names: c.editor_names, priority: c.priority,
     due_date: c.due_date, posted_date: c.posted_date, posted_link: c.posted_link, review_link: c.review_link, notion_url: c.notion_url,
     has_media: c.file_count > 0, counts_as: c.weight ?? client.count_multiplier, in_stage_since: moved.get(c.id) || null,
+    extra: JSON.parse(c.extra || '{}'),
   });
   const firstPosts = db.prepare(
     `SELECT card_id, MIN(at) AS at FROM events
      WHERE client_id = ? AND at >= ? AND source != 'baseline' AND field IN ('status', 'created') AND to_value = 'Posted'
        AND (from_value IS NULL OR from_value NOT IN (${ph(AFTER_DELIVERY)})) GROUP BY card_id`,
   ).all(client.id, iso(now - 30 * DAY), ...AFTER_DELIVERY);
+  // With a posts list, the chart shows real uploads on the days it covers and cards times their multiplier elsewhere.
+  const logged = postWindow(db, client.id);
   const perDay = {};
   for (const r of firstPosts) {
     const d = localDate(cfg.tz, new Date(r.at));
-    perDay[d] = (perDay[d] || 0) + 1;
+    if (logged && d >= logged.first && d <= logged.last) continue;
+    perDay[d] = (perDay[d] || 0) + (logged ? client.count_multiplier || 1 : 1);
+  }
+  if (logged) {
+    for (const r of db.prepare('SELECT posted_on, COUNT(*) AS n FROM posts WHERE client_id = ? AND posted_on IS NOT NULL GROUP BY posted_on').all(client.id)) perDay[r.posted_on] = r.n;
+  }
+  if (client.kind === 'creators') {
+    const bumps = db.prepare(`SELECT at, from_value, to_value FROM events WHERE client_id = ? AND field = 'videos' AND at >= ? AND source IN ('sync', 'portal')`)
+      .all(client.id, iso(now - 30 * DAY));
+    for (const r of bumps) {
+      const d = localDate(cfg.tz, new Date(r.at));
+      perDay[d] = Math.max(0, (perDay[d] || 0) + (Number(r.to_value) || 0) - (Number(r.from_value) || 0));
+    }
   }
   const daily = Array.from({ length: 30 }, (_, i) => {
     const date = localDate(cfg.tz, new Date(now - (29 - i) * DAY));
@@ -191,6 +262,7 @@ export function clientBoard(db, cfg, client, now = Date.now()) {
     cards: cards.filter((c) => c.status && !AFTER_DELIVERY.includes(c.status)).map(card),
     posted: cards.filter(wasPosted).sort(byDate('posted_date', -1)).slice(0, 40).map(card),
     daily,
+    posts: db.prepare('SELECT id, url, title, platform, account, posted_on, views, views_checked FROM posts WHERE client_id = ? ORDER BY posted_on DESC, id').all(client.id),
     events: recentEvents(db, { clientId: client.id, limit: 40 }),
   };
 }
@@ -201,7 +273,7 @@ export function lastSync(db) {
 }
 
 export function adminOverview(db, cfg, now = Date.now()) {
-  const clients = db.prepare('SELECT * FROM clients WHERE active = 1 ORDER BY name').all().map((c) => clientSummary(db, cfg, c, now));
+  const clients = db.prepare('SELECT * FROM clients WHERE active = 1 ORDER BY sort_order, name').all().map((c) => clientSummary(db, cfg, c, now));
   const sum = (k) => clients.reduce((n, c) => n + (c[k] || 0), 0);
   return {
     generated_at: iso(now),
@@ -245,7 +317,11 @@ export function clientOverview(db, cfg, client, now = Date.now()) {
     ready: cards.filter(readyToPost).sort(byDate('due_date')).map(clientCard),
     posted: cards.filter(wasPosted).sort(byDate('posted_date', -1)).slice(0, 60).map(clientCard),
     in_production: cards.filter((c) => IN_PRODUCTION.includes(c.status) && !needsApproval(c) && !changesRequested(c)).length,
-    package: client.package_size ? { size: pkg.size, max: pkg.max, delivered: pkg.delivered, remaining: pkg.remaining, period_end: pkg.period_end, days_left: pkg.days_left } : null,
+    package: { size: pkg.size, max: pkg.max, delivered: pkg.delivered, remaining: pkg.remaining, period_source: pkg.period_source,
+      period_start: pkg.period_start, period_end: pkg.period_end, days_left: pkg.days_left, days_since: pkg.days_since },
+    delivered_30d: delivered(db, client, iso(now - 30 * DAY)),
+    posts: (({ first, last, total, views } = {}) => (total ? { first, last, total, views } : null))(postWindow(db, client.id) || undefined),
+    post_list: db.prepare('SELECT id, url, title, platform, account, posted_on, views, views_checked FROM posts WHERE client_id = ? ORDER BY posted_on DESC, id').all(client.id),
   };
 }
 

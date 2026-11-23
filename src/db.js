@@ -154,6 +154,32 @@ const MIGRATIONS = [
   `,
   // One Cino video goes out on three to four accounts, so each post counts as three toward the package.
   `UPDATE clients SET count_multiplier = 3 WHERE slug = 'cino' AND count_multiplier = 1;`,
+  // Display order, the date of the last invoice (packages count from it), creator campaigns, and their extra fields.
+  `
+  ALTER TABLE clients ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 100;
+  ALTER TABLE clients ADD COLUMN last_invoiced_at TEXT;
+  ALTER TABLE clients ADD COLUMN kind TEXT NOT NULL DEFAULT 'videos';
+  ALTER TABLE cards ADD COLUMN extra TEXT;
+  `,
+  // Every upload as its own row (link, account, platform, views), mirrored from a client's "Posted links" list in Notion.
+  `
+  CREATE TABLE posts (
+    id INTEGER PRIMARY KEY,
+    client_id INTEGER NOT NULL REFERENCES clients(id),
+    notion_page_id TEXT NOT NULL UNIQUE,
+    url TEXT NOT NULL,
+    title TEXT,
+    platform TEXT,
+    account TEXT,
+    posted_on TEXT,
+    views INTEGER,
+    views_checked TEXT,
+    notion_url TEXT,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX posts_by_client ON posts (client_id, posted_on);
+  ALTER TABLE clients ADD COLUMN posts_data_source_id TEXT;
+  `,
 ];
 
 export function openDb(file) {

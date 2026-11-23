@@ -2,7 +2,7 @@
 //   node scripts/dev-seed.js        then open http://localhost:3222 (admin@local.test / local-preview-1)
 // It never touches Notion or the live portal.
 import { openDb, nowIso } from '../src/db.js';
-import { syncClient } from '../src/sync.js';
+import { syncClient, syncPosts } from '../src/sync.js';
 import { hashPassword } from '../src/auth.js';
 import { buildServer } from '../src/server.js';
 import { schema, page, fakeNotion, KUNAL, SARA } from '../test/helpers.js';
@@ -39,7 +39,60 @@ const noah = [
   card('n', 'The edit that doubled watch time', { status: 'Scripting', statusType: 'select' }),
 ];
 
+const opts = (names) => ({ options: names.map((name) => ({ name })) });
+const text = (s) => ({ type: 'rich_text', rich_text: s ? [{ plain_text: s }] : [] });
+const creator = (id, name, stage, chase, posted, next, owner = 'Genji', last = 2) => ({
+  object: 'page', id, url: `https://notion.test/${id}`, created_time: iso(30 * 1440), last_edited_time: iso(60), in_trash: false,
+  properties: {
+    Creator: { type: 'title', title: [{ plain_text: name }] },
+    Stage: { type: 'select', select: { name: stage } },
+    Chase: { type: 'select', select: chase ? { name: chase } : null },
+    'Videos posted': { type: 'number', number: posted },
+    Owner: text(owner), 'Next action': text(next), Blockers: text(''),
+    'Last activity': { type: 'date', date: { start: day(last) } },
+  },
+});
+const rayston = [
+  creator('y1', 'Maya Okafor', 'Posting', 'On track', 14, 'Send brief 4'),
+  creator('y2', 'Tom Reyes', 'Posting', 'On track', 9, ''),
+  creator('y3', 'Ines Duarte', 'Posting', 'Nudge', 6, 'Two days quiet, ask for the next upload', 'Ahmed', 4),
+  creator('y4', 'Callum Hart', 'Ready to post', 'On track', 0, 'First video goes out Monday'),
+  creator('y5', 'Priya Nair', 'Ready to post', 'Chase now', 0, 'Tracking link issued, no post yet', 'Ahmed', 6),
+  creator('y6', 'Jonah Weiss', 'Warm-up', 'On track', 0, 'Day 3 of warm-up'),
+  creator('y7', 'Sofia Lindqvist', 'Warm-up', 'Nudge', 0, 'Remind about daily scrolling', 'Genji', 3),
+  creator('y8', 'Dev Malhotra', 'Onboarding', 'On track', 0, 'Waiting on SideShift connection'),
+  creator('y9', 'Ella Brandt', 'Onboarding', 'Chase now', 0, 'Has not joined the WhatsApp community', 'Genji', 8),
+  creator('y10', 'Marcus Lee', 'Joined – no activity', 'Chase now', 0, 'No reply since joining', 'Ahmed', 11),
+  creator('y11', 'Hana Sato', 'Paused/Silent', 'Chase now', 3, 'Went quiet after video 3', 'Ahmed', 9),
+];
+const raystonSchema = {
+  Creator: { name: 'Creator', type: 'title', title: {} },
+  Stage: { name: 'Stage', type: 'select', select: opts(['Joined – no activity', 'Onboarding', 'Warm-up', 'Ready to post', 'Posting', 'Paused/Silent', 'Not in community']) },
+  Chase: { name: 'Chase', type: 'select', select: opts(['Chase now', 'Nudge', 'On track']) },
+  'Videos posted': { name: 'Videos posted', type: 'number', number: {} },
+  Owner: { name: 'Owner', type: 'rich_text', rich_text: {} },
+  'Next action': { name: 'Next action', type: 'rich_text', rich_text: {} },
+  Blockers: { name: 'Blockers', type: 'rich_text', rich_text: {} },
+  'Last activity': { name: 'Last activity', type: 'date', date: {} },
+};
+const bump = (id, by) => { rayston.find((p) => p.id === id).properties['Videos posted'].number += by; };
+
+const postRow = (id, platform, account, d, views, link, title) => ({
+  object: 'page', id, url: `https://notion.test/${id}`, created_time: iso(600), last_edited_time: iso(60), in_trash: false,
+  properties: {
+    Post: { type: 'title', title: [{ plain_text: title }] }, Link: { type: 'url', url: link },
+    'Posted Date': { type: 'date', date: { start: day(d) } }, Platform: { type: 'select', select: { name: platform } },
+    Account: { type: 'select', select: { name: account } }, Views: { type: 'number', number: views }, 'Views checked': { type: 'date', date: { start: day(0) } },
+  },
+});
+const cinoPosts = [1, 1, 2, 3, 3, 4, 5].flatMap((d, i) => [
+  postRow(`pi${i}`, 'Instagram', '@elena', d, [125, 1538, 3238, 1455, 136, 145, 155][i], `https://www.instagram.com/elena/reel/x${i}/`, `Reel ${i}`),
+  postRow(`py${i}`, 'YouTube', '@elena', d, [3159, 8812, 1159, 20457, 1359, 1205, 25][i], `https://www.youtube.com/shorts/y${i}`, ['Should I go anyway?', 'Is this valid?', 'Is this okay?', 'Should they split?', 'What should I do?', 'Should women split the bill?', 'What would you do?'][i]),
+  postRow(`pt${i}`, 'TikTok', i % 3 ? '@elena' : '@splitwithcino', d, 640 + i * 11, `https://www.tiktok.com/@elena/video/77${i}`, `TikTok ${i}`),
+]);
 const boards = {
+  'cino-posts': { schema: { Post: { type: 'title' }, Link: { type: 'url' }, 'Posted Date': { type: 'date' }, Platform: { type: 'select' }, Account: { type: 'select' }, Views: { type: 'number' }, 'Views checked': { type: 'date' } }, pages: cinoPosts },
+  rayston: { schema: raystonSchema, pages: rayston },
   cino: { schema: schema({ who: 'Elena' }), pages: cino },
   raymond: { schema: schema({ who: 'Raymond' }), pages: raymond },
   noah: { schema: schema({ who: 'Noah', statusType: 'select' }), pages: noah },
@@ -50,7 +103,11 @@ const add = db.prepare('INSERT INTO clients (slug, name, notion_data_source_id, 
 add.run('cino', 'Cino', 'cino', 60, 90, 3, null, nowIso());
 add.run('noah-eubanks', 'Noah Eubanks', 'noah', 30, 30, 1, null, nowIso());
 add.run('raymond-ng', 'Raymond Ng', 'raymond', 30, 45, 1, null, nowIso());
-const clients = () => db.prepare('SELECT * FROM clients').all();
+add.run('rayston', 'Rayston', 'rayston', null, null, 1, null, nowIso());
+db.prepare("UPDATE clients SET kind = 'creators' WHERE slug = 'rayston'").run();
+['rayston', 'cino', 'raymond-ng', 'noah-eubanks'].forEach((s, i) => db.prepare('UPDATE clients SET sort_order = ? WHERE slug = ?').run(i + 1, s));
+db.prepare("UPDATE clients SET last_invoiced_at = ? WHERE slug = 'raymond-ng'").run(day(9));
+const clients = () => db.prepare('SELECT * FROM clients ORDER BY sort_order').all();
 const move = (list, title, status, approval) => {
   const p = list.find((x) => x.properties['Content Name'].title[0].plain_text === title).properties;
   const s = p.Status;
@@ -63,12 +120,18 @@ for (const c of clients()) await syncClient(db, notion, c, iso(6 * 1440));
 move(cino, 'Should the higher earner pay more', 'Review', 'Needs Elena Approval');
 for (const c of clients()) await syncClient(db, notion, c, iso(54 * 60));
 move(raymond, 'Leasehold in plain words', 'Review');
+bump('y1', 2);
+bump('y2', 1);
 move(cino, 'Couple split, take 1', 'Editing');
 for (const c of clients()) await syncClient(db, notion, c, iso(190));
 move(cino, 'Rent split when one works from home', 'Review');
 move(noah, 'Why hooks die at two seconds', 'Review');
 move(cino, 'Holiday fund, three ways', 'Posted');
+bump('y1', 1);
+bump('y3', 2);
 for (const c of clients()) await syncClient(db, notion, c, iso(35));
+db.prepare("UPDATE clients SET posts_data_source_id = 'cino-posts' WHERE slug = 'cino'").run();
+await syncPosts(db, notion, clients().find((c) => c.slug === 'cino'));
 db.prepare('INSERT INTO sync_runs (started_at, finished_at, ok, cards, events, detail) VALUES (?, ?, 1, ?, 0, ?)')
   .run(iso(2), iso(2), cino.length + raymond.length + noah.length, JSON.stringify(clients().map((c) => ({ client: c.slug, ok: true }))));
 const slack = db.prepare('INSERT INTO slack_status (client_id, channel_id, waiting, waiting_since, last_from, last_text, checked_at) VALUES (?, ?, ?, ?, ?, ?, ?)');

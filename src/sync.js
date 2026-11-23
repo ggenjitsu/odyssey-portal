@@ -1,5 +1,5 @@
 import { tx, nowIso } from './db.js';
-import { resolvePropMap, normalizePage, buildProps } from './notion.js';
+import { resolvePropMap, normalizePage, buildProps, resolvePostMap, normalizePost } from './notion.js';
 
 // One queue for everything that reads or writes Notion state, so a pull that started before a
 // portal action can never land after it and log a change that did not happen.
@@ -15,7 +15,7 @@ const locked = createMutex();
 
 const CARD_COLS = [
   'title', 'status', 'approval', 'approval_raw', 'editor_ids', 'editor_names', 'priority', 'funnel', 'posting', 'due_date',
-  'posted_date', 'posted_link', 'review_link', 'script_url', 'inspo_url', 'delay_reason', 'file_count', 'weight', 'notion_url',
+  'posted_date', 'posted_link', 'review_link', 'script_url', 'inspo_url', 'delay_reason', 'file_count', 'weight', 'extra', 'notion_url',
   'created_at', 'last_edited_at',
 ];
 
@@ -61,6 +61,8 @@ export function applyPull(db, client, propMap, cards, now) {
       insert.run({ id: c.id, client_id: client.id, ...cardRow(c), now });
       if (!baseline) {
         ev(c, { field: 'created', to: c.status });
+        const posted = Number(JSON.parse(c.extra || '{}').videos_posted) || 0;
+        if (posted > 0) ev(c, { field: 'videos', from: '0', to: String(posted) });
         continue;
       }
       // First ever pull of this board: record where each card stands, and estimate when posted
@@ -77,6 +79,13 @@ export function applyPull(db, client, propMap, cards, now) {
     if (old.status !== c.status) ev(c, { field: 'status', from: old.status, to: c.status });
     if (old.approval_raw !== c.approval_raw) ev(c, { field: 'approval', from: old.approval_raw, to: c.approval_raw });
     if (old.editor_ids !== c.editor_ids) ev(c, { field: 'editor', from: old.editor_names || null, to: c.editor_names || null });
+    if ((old.extra || null) !== (c.extra || null)) {
+      // Creator campaigns: a rising "Videos posted" number is how new videos are counted.
+      const was = JSON.parse(old.extra || '{}');
+      const now2 = JSON.parse(c.extra || '{}');
+      if ((Number(was.videos_posted) || 0) !== (Number(now2.videos_posted) || 0)) ev(c, { field: 'videos', from: String(Number(was.videos_posted) || 0), to: String(Number(now2.videos_posted) || 0) });
+      if ((was.chase || null) !== (now2.chase || null)) ev(c, { field: 'chase', from: was.chase || null, to: now2.chase || null });
+    }
     update.run({ id: c.id, ...cardRow(c), now });
   }
 
@@ -105,6 +114,32 @@ export function syncClient(db, notion, client, now = nowIso()) {
   });
 }
 
+// A client's "Posted links" list. The portal keeps an exact copy: rows added, changed or removed in
+// Notion are added, changed or removed here.
+export function syncPosts(db, notion, client, now = nowIso()) {
+  return locked(async () => {
+    const schema = await notion.dataSource(client.posts_data_source_id);
+    const map = resolvePostMap(schema.properties);
+    if (!map.link) throw new Error('This posts list has no Link column');
+    const pages = await notion.queryAll(client.posts_data_source_id);
+    const rows = pages.filter((p) => !p.in_trash && !p.archived).map((p) => normalizePost(p, map)).filter((r) => r.url);
+    return tx(db, () => {
+      const keep = new Set(rows.map((r) => r.notion_page_id));
+      const gone = db.prepare('SELECT notion_page_id FROM posts WHERE client_id = ?').all(client.id).filter((r) => !keep.has(r.notion_page_id));
+      for (const r of gone) db.prepare('DELETE FROM posts WHERE notion_page_id = ?').run(r.notion_page_id);
+      const put = db.prepare(
+        `INSERT INTO posts (client_id, notion_page_id, url, title, platform, account, posted_on, views, views_checked, notion_url, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(notion_page_id) DO UPDATE SET client_id = excluded.client_id, url = excluded.url, title = excluded.title,
+           platform = excluded.platform, account = excluded.account, posted_on = excluded.posted_on, views = excluded.views,
+           views_checked = excluded.views_checked, notion_url = excluded.notion_url, updated_at = excluded.updated_at`,
+      );
+      for (const r of rows) put.run(client.id, r.notion_page_id, r.url, r.title, r.platform, r.account, r.posted_on, r.views, r.views_checked, r.notion_url, now);
+      return { posts: rows.length };
+    });
+  });
+}
+
 // A short, name-free label for why a board failed, safe to show on the public health check.
 const reasonFor = (err) =>
   err.status === 404 || err.code === 'object_not_found' ? 'board_not_shared_with_integration'
@@ -122,6 +157,13 @@ export async function syncAll(db, notion) {
       results.push({ client: client.slug, ok: true, ...(await syncClient(db, notion, client)) });
     } catch (err) {
       results.push({ client: client.slug, ok: false, error: err.message, reason: reasonFor(err) });
+    }
+    if (client.posts_data_source_id) {
+      try {
+        results.push({ client: `${client.slug} posts`, ok: true, ...(await syncPosts(db, notion, client)) });
+      } catch (err) {
+        results.push({ client: `${client.slug} posts`, ok: false, error: err.message, reason: `posts_list_${reasonFor(err)}` });
+      }
     }
   }
   const ok = results.every((r) => r.ok);
