@@ -91,11 +91,19 @@ export async function buildServer({ db, cfg, notion = null, slack = null, stripe
 
   // ---------- health and sign-in ----------
 
-  app.get('/api/health', async () => ({
-    ok: true,
-    last_sync_at: lastSync(db)?.finished_at || null,
-    notion: Boolean(notion), slack: Boolean(slack), stripe: Boolean(stripe),
-  }));
+  // Public and safe to share: no names, no content, just whether the machinery is turning.
+  app.get('/api/health', async () => {
+    const run = lastSync(db);
+    return {
+      ok: true,
+      last_sync_at: run?.finished_at || null,
+      last_sync_ok: run ? run.ok : null,
+      boards: run ? run.detail.length : 0,
+      boards_ok: run ? run.detail.filter((r) => r.ok).length : 0,
+      cards: run?.cards ?? 0,
+      notion: Boolean(notion), slack: Boolean(slack), stripe: Boolean(stripe),
+    };
+  });
 
   app.post('/api/auth/login', async (req, reply) => {
     const email = String(req.body?.email || '').trim().toLowerCase();
