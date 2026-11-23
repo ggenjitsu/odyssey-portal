@@ -360,9 +360,9 @@ a.tile:hover { background: var(--glass-3); }
 
 .chart { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 4px; align-items: end; height: 168px; padding: 12px 12px 0; }
 .chart-col { display: flex; align-items: flex-end; height: 100%; }
-.chart-col i { display: block; width: 100%; border-radius: 3px 3px 1px 1px; background: rgba(237, 237, 237, 0.4); }
+.chart-col i { display: block; width: 100%; border-radius: 3px 3px 1px 1px; background: color-mix(in srgb, var(--tint, #ededed) 62%, transparent); }
 .chart-col i.is-zero { background: rgba(237, 237, 237, 0.12); }
-.chart-col.is-today i { background: var(--text); }
+.chart-col.is-today i { background: var(--tint, var(--text)); }
 .chart-axis { display: flex; justify-content: space-between; padding: 8px 12px 12px; }
 
 .facts { display: grid; padding: 0 12px 8px; }

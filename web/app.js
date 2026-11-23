@@ -280,7 +280,7 @@ function stat(label, figure, note, waiting) {
 // The two numbers that matter most lead every client page: views, and how much went out.
 function headline(o) {
   const p = o.package || {};
-  const posted = stat('Videos posted', p.delivered ?? 0, p.size ? `of ${rangeOf(p)} ${periodWords(p)}` : periodWords(p));
+  const posted = stat('Videos posted', p.delivered ?? 0, '');
   return o.posts
     ? [stat('Views', o.posts.views, `on ${plural(o.posts.total, 'upload')}, ${dateUtc(o.posts.first)} to ${dateUtc(o.posts.last)}`), posted]
     : [posted, stat('Last 30 days', o.delivered_30d ?? 0, 'videos posted')];
@@ -834,6 +834,8 @@ function clientsView() {
 
 // ---------- admin: one client's tracking board ----------
 
+const TINTS = { cino: '#8fd694', 'raymond-ng': '#a78bfa', rayston: '#f0a8b8', 'noah-eubanks': '#ffb38a', default: '#b79cf2' };
+
 function postedChart(daily) {
   const max = Math.max(1, ...daily.map((d) => d.posted));
   const total = daily.reduce((n, d) => n + d.posted, 0);
@@ -1057,6 +1059,9 @@ function render() {
     else if (r === '/' && state.overview) view = adminView(state.overview);
   } else if (u.role === 'client' && state.client) view = clientView(state.client);
   else if (u.role === 'editor' && state.editor) view = editorView(state.editor);
+  // Charts pick up a colour from the client's own picture.
+  const who = /^\/client\/([\w-]+)/.exec(r)?.[1] || (u?.role === 'client' && state.client?.client.slug) || '';
+  document.documentElement.style.setProperty('--tint', TINTS[who] || TINTS.default);
   setBackdrop(bg);
   app.replaceChildren(view || h('div', {}, topbar()));
 }
