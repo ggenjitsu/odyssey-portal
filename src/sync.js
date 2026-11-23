@@ -97,11 +97,21 @@ export function syncClient(db, notion, client, now = nowIso()) {
     const propMap = resolvePropMap(schema.properties);
     if (!propMap.status) throw new Error('This board has no Status column');
     const pages = await notion.queryAll(client.notion_data_source_id);
-    const cards = pages.filter((p) => !p.in_trash && !p.archived).map((p) => normalizePage(p, propMap));
+    // Rows that are only there to be duplicated ("TEMPLATE - Standard Video") are not videos.
+    const cards = pages.filter((p) => !p.in_trash && !p.archived).map((p) => normalizePage(p, propMap))
+      .filter((c) => !/^[^\p{L}\p{N}]*template\b/iu.test(c.title));
     const fresh = db.prepare('SELECT * FROM clients WHERE id = ?').get(client.id);
     return tx(db, () => applyPull(db, fresh, propMap, cards, now));
   });
 }
+
+// A short, name-free label for why a board failed, safe to show on the public health check.
+const reasonFor = (err) =>
+  err.status === 404 || err.code === 'object_not_found' ? 'board_not_shared_with_integration'
+  : err.status === 401 ? 'notion_key_rejected'
+  : /no Status column/.test(err.message) ? 'no_status_column'
+  : err.status === 429 || err.status >= 500 || err.code === 'network' ? 'notion_unavailable'
+  : 'other';
 
 export async function syncAll(db, notion) {
   const started = nowIso();
@@ -111,7 +121,7 @@ export async function syncAll(db, notion) {
     try {
       results.push({ client: client.slug, ok: true, ...(await syncClient(db, notion, client)) });
     } catch (err) {
-      results.push({ client: client.slug, ok: false, error: err.message });
+      results.push({ client: client.slug, ok: false, error: err.message, reason: reasonFor(err) });
     }
   }
   const ok = results.every((r) => r.ok);

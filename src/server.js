@@ -101,6 +101,7 @@ export async function buildServer({ db, cfg, notion = null, slack = null, stripe
       boards: run ? run.detail.length : 0,
       boards_ok: run ? run.detail.filter((r) => r.ok).length : 0,
       cards: run?.cards ?? 0,
+      problems: run ? run.detail.filter((r) => !r.ok).map((r) => r.reason || 'other') : [],
       notion: Boolean(notion), slack: Boolean(slack), stripe: Boolean(stripe),
     };
   });
