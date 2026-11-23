@@ -130,6 +130,8 @@ export async function buildServer({ db, cfg, notion = null, slack = null, stripe
       boards_ok: run ? run.detail.filter((r) => r.ok).length : 0,
       cards: run?.cards ?? 0,
       problems: run ? run.detail.filter((r) => !r.ok).map((r) => r.reason || 'other') : [],
+      // False means nobody can sign in yet: ADMIN_EMAIL or ADMIN_PASSWORD is missing or the password is under 10 characters.
+      founder_login_ready: Boolean(db.prepare("SELECT 1 FROM users WHERE role = 'admin' AND active = 1 AND password_hash IS NOT NULL LIMIT 1").get()),
       notion: Boolean(notion), slack: Boolean(slack), stripe: Boolean(stripe),
     };
   });

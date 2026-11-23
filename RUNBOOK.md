@@ -11,7 +11,7 @@ How to deploy, run and fix the Odyssey Portal. Written so the owner never depend
 5. Keep **one replica**. The database is a single file and the sync runs inside the web process.
 6. Open `<address>/api/health`. `notion: true` means the token loaded. `last_sync_at` fills in within a minute.
 
-After the first admin login works, you can delete `ADMIN_PASSWORD` from Variables. It is only read when no admin exists.
+The login in `ADMIN_EMAIL` and `ADMIN_PASSWORD` is reset to those values on every start, so it is the way back in after a lockout: set a new `ADMIN_PASSWORD` (10+ characters) and redeploy. Once the founders have their own logins from the People screen, delete `ADMIN_PASSWORD` so it stops overriding. `/api/health` shows `founder_login_ready: false` when nobody can sign in.
 
 ## Everyday jobs
 

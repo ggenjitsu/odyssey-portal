@@ -152,6 +152,8 @@ const MIGRATIONS = [
   );
   CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
   `,
+  // One Cino video goes out on three to four accounts, so each post counts as three toward the package.
+  `UPDATE clients SET count_multiplier = 3 WHERE slug = 'cino' AND count_multiplier = 1;`,
 ];
 
 export function openDb(file) {

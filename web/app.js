@@ -123,8 +123,7 @@ function entry({ heading, fields, button, note, onSubmit }) {
   return h('div', { class: 'entry' },
     h('div', { class: 'entry-copy' },
       h('div', { class: 'wordmark' }, 'Odyssey', h('span', {}, 'Portal')),
-      h('h1', {}, 'Every video, and who it is waiting on'),
-      h('p', {}, 'The production portal for Odyssey Digital, its editors and its clients')),
+      h('h1', {}, 'Everything in one place')),
     form);
 }
 
