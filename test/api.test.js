@@ -71,6 +71,7 @@ test('a client sees only their own videos and cannot reach admin, editor or anot
   assert.ok(!JSON.stringify(view).includes('Kunal'));
   assert.equal((await elena.get('/api/client/overview?client=noah')).json().client.name, 'Cino'); // the query is ignored for clients
   assert.equal((await elena.get('/api/admin/overview')).statusCode, 403);
+  assert.equal((await elena.get('/api/admin/clients/noah/board')).statusCode, 403);
   assert.equal((await elena.get('/api/editor/overview')).statusCode, 403);
   assert.equal((await elena.post('/api/cards/n1/approve')).statusCode, 404); // another client's video
   assert.equal((await elena.post('/api/cards/c2/approve')).statusCode, 404); // her client's, but still in editing
@@ -142,6 +143,12 @@ test('admin: overview, invites, client settings and read-only API keys', async (
   const boss = as(await login('boss@odyssey.test'));
   const overview = (await boss.get('/api/admin/overview')).json();
   assert.deepEqual(overview.clients.map((c) => [c.name, c.needs_approval]), [['Cino', 1], ['Noah', 1]]);
+
+  const board = (await boss.get('/api/admin/clients/cino/board')).json();
+  assert.deepEqual(board.cards.map((c) => [c.title, c.status]).sort(), [['Cino banked', 'Ready'], ['Cino in edit', 'Editing'], ['Cino review', 'Ready']]);
+  assert.equal(board.daily.length, 30);
+  assert.equal(board.client.name, 'Cino');
+  assert.equal((await boss.get('/api/admin/clients/nobody/board')).statusCode, 404);
 
   const made = (await boss.post('/api/admin/users', { email: 'noah@noah.test', name: 'Noah', role: 'client', client_id: client(db, 'noah').id })).json();
   assert.match(made.invite_url, /^https:\/\/portal\.test\/invite\//);

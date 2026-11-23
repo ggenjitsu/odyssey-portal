@@ -157,6 +157,44 @@ export function recentEvents(db, { clientId = null, limit = 50, before = null } 
   ).all(...args, Math.min(500, Math.max(1, Number(limit) || 50)));
 }
 
+// One client's whole tracking board for the founders: every card by stage, what went out and when,
+// the package in detail and the client's own change log.
+export function clientBoard(db, cfg, client, now = Date.now()) {
+  const cards = db.prepare('SELECT * FROM cards WHERE client_id = ? AND missing_since IS NULL').all(client.id);
+  // When each card last changed stage, from changes the portal actually saw (not the day-one snapshot).
+  const moved = new Map(db.prepare(
+    `SELECT card_id, MAX(at) AS at FROM events
+     WHERE client_id = ? AND field IN ('status', 'created', 'restored') AND source IN ('sync', 'portal') GROUP BY card_id`,
+  ).all(client.id).map((r) => [r.card_id, r.at]));
+  const card = (c) => ({
+    id: c.id, title: c.title, status: c.status, approval: c.approval, editor_names: c.editor_names, priority: c.priority,
+    due_date: c.due_date, posted_date: c.posted_date, posted_link: c.posted_link, review_link: c.review_link, notion_url: c.notion_url,
+    has_media: c.file_count > 0, counts_as: c.weight ?? client.count_multiplier, in_stage_since: moved.get(c.id) || null,
+  });
+  const firstPosts = db.prepare(
+    `SELECT card_id, MIN(at) AS at FROM events
+     WHERE client_id = ? AND at >= ? AND source != 'baseline' AND field IN ('status', 'created') AND to_value = 'Posted'
+       AND (from_value IS NULL OR from_value NOT IN (${ph(AFTER_DELIVERY)})) GROUP BY card_id`,
+  ).all(client.id, iso(now - 30 * DAY), ...AFTER_DELIVERY);
+  const perDay = {};
+  for (const r of firstPosts) {
+    const d = localDate(cfg.tz, new Date(r.at));
+    perDay[d] = (perDay[d] || 0) + 1;
+  }
+  const daily = Array.from({ length: 30 }, (_, i) => {
+    const date = localDate(cfg.tz, new Date(now - (29 - i) * DAY));
+    return { date, posted: perDay[date] || 0 };
+  });
+  return {
+    client: clientSummary(db, cfg, client, now),
+    timezone: cfg.tz,
+    cards: cards.filter((c) => c.status && !AFTER_DELIVERY.includes(c.status)).map(card),
+    posted: cards.filter(wasPosted).sort(byDate('posted_date', -1)).slice(0, 40).map(card),
+    daily,
+    events: recentEvents(db, { clientId: client.id, limit: 40 }),
+  };
+}
+
 export function lastSync(db) {
   const run = db.prepare('SELECT started_at, finished_at, ok, cards, events, detail FROM sync_runs ORDER BY id DESC LIMIT 1').get();
   return run ? { ...run, ok: Boolean(run.ok), detail: JSON.parse(run.detail || '[]') } : null;
@@ -188,12 +226,12 @@ export function adminOverview(db, cfg, now = Date.now()) {
   };
 }
 
+const byDate = (key, dir = 1) => (a, b) => dir * String(a[key] || '9999').localeCompare(String(b[key] || '9999'));
+
 const clientCard = (c) => ({
   id: c.id, title: c.title, status: c.status, approval: c.approval, due_date: c.due_date, posted_date: c.posted_date,
   posted_link: c.posted_link, review_link: c.review_link, has_media: c.file_count > 0, funnel: c.funnel, posting: c.posting,
 });
-
-const byDate = (key, dir = 1) => (a, b) => dir * String(a[key] || '9999').localeCompare(String(b[key] || '9999'));
 
 // Everything a client login gets. Nothing about editors, priorities, delays, money or other clients.
 export function clientOverview(db, cfg, client, now = Date.now()) {

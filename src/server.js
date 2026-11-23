@@ -8,7 +8,7 @@ import {
   hashPassword, verifyPassword, createSession, destroySession, sessionUser, createInvite, acceptInvite, createApiKey, apiKeyValid,
   SESSION_DAYS, MIN_PASSWORD,
 } from './auth.js';
-import { adminOverview, clientOverview, editorOverview, recentEvents, lastSync } from './metrics.js';
+import { adminOverview, clientOverview, clientBoard, editorOverview, recentEvents, lastSync } from './metrics.js';
 import { applyCardChange } from './sync.js';
 import { pageFiles } from './notion.js';
 import { STATUSES, WORK, needsReview, needsApproval, readyToPost, clientVisible } from './rules.js';
@@ -380,6 +380,12 @@ export async function buildServer({ db, cfg, notion = null, slack = null, stripe
     if ('slack_channel_id' in fields) jobs?.slack().catch(() => {});
     if ('stripe_customer_id' in fields) jobs?.billing().catch(() => {});
     return { ok: true };
+  });
+
+  app.get('/api/admin/clients/:slug/board', admin, async (req, reply) => {
+    const client = db.prepare('SELECT * FROM clients WHERE slug = ?').get(String(req.params.slug));
+    if (!client) return reply.code(404).send({ error: 'Client not found' });
+    return { ...clientBoard(db, cfg, client), background: backgroundFor(client) };
   });
 
   // Boards the integration can see that are not attached to a client yet.

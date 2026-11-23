@@ -2,7 +2,7 @@
 // Everything that comes from Notion or a person is written as text, never as HTML.
 
 const app = document.getElementById('app');
-const state = { user: null, overview: null, client: null, editor: null, people: null, clientList: null, channels: undefined,
+const state = { user: null, overview: null, client: null, board: null, editor: null, people: null, clientList: null, channels: undefined,
   sendBack: null, form: null, invite: null, busy: new Set(), entered: false };
 
 // ---------- helpers ----------
@@ -176,7 +176,7 @@ function topbar(right) {
       h('button', { class: 'btn btn-quiet', type: 'button', 'aria-label': 'Sign out', title: 'Sign out',
         onclick: async () => {
           await api('/auth/logout', { method: 'POST' }).catch(() => {});
-          Object.assign(state, { user: null, overview: null, client: null, editor: null, people: null, clientList: null, invite: null, form: null });
+          Object.assign(state, { user: null, overview: null, client: null, board: null, editor: null, people: null, clientList: null, invite: null, form: null });
           history.replaceState(null, '', '/');
           render();
         } }, icon('leave'))));
@@ -281,7 +281,7 @@ function clientRow(c) {
   const waiting = c.slack?.waiting;
   return h('div', { class: 'row client' },
     h('div', {},
-      h('a', { class: 'client-name', href: `/client/${c.slug}`, title: 'See their portal', onclick: nav(`/client/${c.slug}`) }, c.name),
+      h('a', { class: 'client-name', href: `/client/${c.slug}`, title: `Open ${c.name}'s tracking board`, onclick: nav(`/client/${c.slug}`) }, c.name),
       h('div', { class: 'small' }, c.synced ? `${c.in_production} in production` : 'Not synced yet',
         c.overdue > 0 && h('span', { class: 'pace-behind' }, `, ${c.overdue} overdue`))),
     track(c.by_status),
@@ -320,7 +320,6 @@ function adminView(o) {
   const [weekday, ...rest] = new Intl.DateTimeFormat('en-GB', { weekday: 'long', day: 'numeric', month: 'long', timeZone: tz }).format(new Date()).replace(',', '').split(' ');
   const total = o.clients.reduce((n, c) => n + c.total, 0);
   const sync = o.last_sync;
-  const reviewers = o.reviewers.join(' or ');
   const maxDone = Math.max(1, ...o.editors.map((e) => e.done_7d));
   const syncing = state.busy.has('sync');
 
@@ -337,14 +336,14 @@ function adminView(o) {
           onclick: () => act('sync', () => api('/admin/sync', { method: 'POST' })) }, icon('refresh'), syncing ? 'Syncing' : 'Sync now')),
 
       h('section', { class: 'stats', 'aria-label': 'Today' },
-        stat('Needs review', t.needs_review, `from ${reviewers}`, true),
+        stat('Needs your review', t.needs_review, 'before the client sees it', true),
         stat('With clients', t.needs_approval, 'waiting for approval'),
         stat('Ready to post', t.ready, 'finished, not out yet'),
         stat('Posted', t.delivered_7d, `last 7 days, ${t.delivered_30d} in 30`)),
 
       h('div', { class: 'cols' },
         h('section', { class: 'panel glass' },
-          h('div', { class: 'panel-head' }, h('h2', {}, `Needs review from ${reviewers}`), h('p', {}, 'Longest wait first')),
+          h('div', { class: 'panel-head' }, h('h2', {}, 'Needs review from you'), h('p', {}, 'Longest wait first')),
           o.needs_review.length ? h('div', { class: 'rows' }, o.needs_review.map(reviewRow)) : h('p', { class: 'empty' }, 'Nothing is waiting on you')),
         h('section', { class: 'panel glass' },
           h('div', { class: 'panel-head' }, h('h2', {}, 'Editors'), h('p', {}, 'Finished, last 7 days')),
@@ -620,7 +619,7 @@ function clientsView() {
     } },
     h('div', {},
       h('div', { class: 'client-name' }, c.name),
-      h('a', { class: 'link', href: `/client/${c.slug}`, onclick: nav(`/client/${c.slug}`) }, 'See their portal', icon('out'))),
+      h('a', { class: 'link', href: `/client/${c.slug}/preview`, onclick: nav(`/client/${c.slug}/preview`) }, 'See their portal', icon('out'))),
     field('Package from', num('package_size', c.package_size)),
     field('to', num('package_max', c.package_max)),
     field('Counts as', num('count_multiplier', c.count_multiplier, { min: 0.5, max: 20, step: 0.5 })),
@@ -650,6 +649,81 @@ function clientsView() {
       panel('Add a client', 'Share their board with the Odyssey Portal connection in Notion first', add)));
 }
 
+// ---------- admin: one client's tracking board ----------
+
+function postedChart(daily) {
+  const max = Math.max(1, ...daily.map((d) => d.posted));
+  const total = daily.reduce((n, d) => n + d.posted, 0);
+  return h('div', {},
+    h('div', { class: 'chart', role: 'img', 'aria-label': `Videos posted per day over the last 30 days, ${total} in total` },
+      daily.map((d, i) => {
+        const bar = h('i', { class: d.posted ? '' : 'is-zero', title: `${dateShort(d.date)}: ${d.posted} posted` });
+        bar.style.height = d.posted ? `${Math.max(8, (d.posted / max) * 100)}%` : '2px';
+        return h('div', { class: `chart-col${i === daily.length - 1 ? ' is-today' : ''}` }, bar);
+      })),
+    h('div', { class: 'chart-axis small' }, h('span', {}, dateShort(daily[0].date)), h('span', {}, dateShort(daily[14].date)), h('span', {}, 'Today')));
+}
+
+function boardView(b) {
+  const c = b.client;
+  const p = c.package;
+  const today = todayIso();
+  const range = p.size ? (p.max && p.max !== p.size ? `${p.size} to ${p.max}` : `${p.size}`) : null;
+  const fact = (label, value) => h('div', { class: 'fact' }, h('span', {}, label), h('b', {}, value));
+  const tile = (card) => {
+    const overdue = card.due_date && card.due_date.slice(0, 10) < today;
+    const bits = [card.editor_names || 'No editor', card.due_date && `due ${dateShort(card.due_date)}`, card.in_stage_since && `here ${span(card.in_stage_since)}`].filter(Boolean);
+    const url = safeUrl(card.notion_url);
+    return h(url ? 'a' : 'div', { class: `tile${overdue ? ' is-late' : ''}`, href: url, target: url && '_blank', rel: url && 'noopener', title: card.title },
+      h('span', { class: 'tile-title' }, card.title), h('small', {}, bits.join(' · ')));
+  };
+  const column = (stage) => {
+    const items = b.cards.filter((x) => x.status === stage);
+    return h('div', { class: `col${stage === 'Review' && items.length ? ' is-waiting' : ''}` },
+      h('div', { class: 'col-head' }, h('span', {}, sentence(stage)), h('b', {}, items.length)),
+      h('div', { class: 'col-cards' }, items.map(tile)));
+  };
+  const postedRow = (card) => videoRow(card, [
+    card.posted_date && h('span', {}, dateShort(card.posted_date)),
+    card.editor_names && h('span', {}, card.editor_names),
+    card.counts_as > 1 && h('span', {}, `counts as ${card.counts_as}`),
+    safeUrl(card.posted_link) && h('a', { class: 'link', href: card.posted_link, target: '_blank', rel: 'noopener' }, 'View post', icon('out')),
+    safeUrl(card.notion_url) && h('a', { class: 'link', href: card.notion_url, target: '_blank', rel: 'noopener' }, 'Notion', icon('out')),
+  ], [watchButton(card)]);
+
+  return h('div', {}, topbar(),
+    page(
+      h('div', { class: 'page-head' },
+        h('div', {},
+          h('h1', { class: 'title' }, c.name),
+          h('p', { class: 'sub' }, `${c.in_production} in production`, range ? `, ${p.delivered} of ${range} posted this period` : '', c.overdue ? `, ${c.overdue} overdue` : '')),
+        h('a', { class: 'btn', href: `/client/${c.slug}/preview`, onclick: nav(`/client/${c.slug}/preview`) }, 'See what they see', icon('out'))),
+
+      h('section', { class: 'stats', 'aria-label': c.name },
+        stat('Needs your review', c.needs_review, 'before the client sees it', true),
+        stat('With the client', c.needs_approval, 'waiting for approval'),
+        stat('Ready to post', c.ready, 'finished, not out yet'),
+        stat('Posted', c.posted_30d, 'videos in the last 30 days')),
+
+      panel('Pipeline', 'Every video in production, by stage. Click one to open it in Notion',
+        h('div', { class: 'board' }, STAGES.map(column))),
+
+      h('div', { class: 'cols' },
+        panel('Posted per day', 'Last 30 days', postedChart(b.daily)),
+        panel('Package', p.period_source === 'stripe' ? 'Period from Stripe' : p.period_source === 'anchor' ? 'Period from your start day' : 'Calendar month',
+          h('div', { class: 'facts' },
+            range ? fact('Posted this period', `${p.delivered} of ${range}`) : fact('Package', 'Not set'),
+            range && fact('Should be at by today', p.expected),
+            range && fact('Still to post', p.remaining),
+            fact('Days left', p.days_left),
+            fact('Each post counts as', c.counts_as),
+            fact('Finished and banked', c.ready),
+            fact('Runway', !c.ready ? 'Nothing banked' : c.runway_days == null ? 'No posting pace yet' : `About ${plural(Math.max(1, Math.round(c.runway_days)), 'day')}`)))),
+
+      panel('Posted', 'Most recent first', list(b.posted, postedRow, 'Nothing posted yet')),
+      panel('Activity', `Every change logged for ${c.name}`, list(b.events, (e) => eventRow(e, b.timezone), 'Changes show up here as cards move in Notion'))));
+}
+
 // ---------- flow ----------
 
 function route() {
@@ -675,8 +749,10 @@ async function load() {
   const r = route();
   try {
     if (u.role === 'admin') {
-      const preview = /^\/client\/([\w-]+)$/.exec(r);
+      const preview = /^\/client\/([\w-]+)\/preview$/.exec(r);
+      const board = /^\/client\/([\w-]+)$/.exec(r);
       if (preview) state.client = await api(`/client/overview?client=${encodeURIComponent(preview[1])}`);
+      else if (board) state.board = await api(`/admin/clients/${encodeURIComponent(board[1])}/board`);
       else if (r === '/people') {
         state.people = await api('/admin/users');
         state.clientList = (await api('/admin/clients')).clients;
@@ -701,9 +777,12 @@ function render() {
   let view;
   if (!u) view = invite ? inviteView(invite[1]) : loginView();
   else if (u.role === 'admin') {
-    if (r.startsWith('/client/') && state.client) {
+    if (/^\/client\/[\w-]+\/preview$/.test(r) && state.client) {
       view = clientView(state.client, true);
       bg = state.client.client.background || bg;
+    } else if (/^\/client\/[\w-]+$/.test(r) && state.board) {
+      view = boardView(state.board);
+      bg = state.board.background || bg;
     } else if (r === '/people' && state.people) view = peopleView();
     else if (r === '/clients' && state.clientList) view = clientsView();
     else if (r === '/' && state.overview) view = adminView(state.overview);
