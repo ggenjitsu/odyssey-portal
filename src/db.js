@@ -182,6 +182,8 @@ const MIGRATIONS = [
   `,
   // A posts-list row can stand for several uploads (one row per creator account, as SideShift reports them).
   `ALTER TABLE posts ADD COLUMN uploads INTEGER NOT NULL DEFAULT 1;`,
+  // What a key may do: 'read', or 'full' for an assistant that is trusted to make changes.
+  `ALTER TABLE api_keys ADD COLUMN scope TEXT NOT NULL DEFAULT 'read';`,
 ];
 
 export function openDb(file) {

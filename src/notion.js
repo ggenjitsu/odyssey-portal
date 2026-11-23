@@ -42,6 +42,7 @@ export function createNotion({ token, version = '2025-09-03', fetchImpl = fetch,
     database: (id) => call('GET', `/databases/${id}`),
     page: (id) => call('GET', `/pages/${id}`),
     updatePage: (id, properties) => call('PATCH', `/pages/${id}`, { properties }),
+    createPage: (dataSourceId, properties) => call('POST', '/pages', { parent: { type: 'data_source_id', data_source_id: dataSourceId }, properties }),
     comment: (pageId, text) =>
       call('POST', '/comments', { parent: { page_id: pageId }, rich_text: [{ text: { content: text.slice(0, 1900) } }] }),
 
@@ -207,6 +208,22 @@ export function guessPost(url) {
   if (host === 'tiktok.com') return { platform: 'TikTok', account: first.startsWith('@') ? first : null };
   if (host === 'youtube.com' || host === 'youtu.be') return { platform: 'YouTube', account: first.startsWith('@') ? first : null };
   return {};
+}
+
+// Notion properties for a posts-list row. Only the fields given are written, so an update can touch views alone.
+export function buildPostProps(map, r, today) {
+  const props = {};
+  const text = (s) => [{ text: { content: String(s).slice(0, 200) } }];
+  if (r.title != null && map.title) props[map.title.name] = { title: text(r.title) };
+  if (r.url && map.link) props[map.link.name] = { url: r.url };
+  if (r.date && map.date) props[map.date.name] = { date: { start: r.date } };
+  for (const k of ['platform', 'account']) {
+    if (r[k] && map[k]) props[map[k].name] = map[k].type === 'select' ? { select: { name: String(r[k]).replace(/,/g, ' ').slice(0, 90) } } : { rich_text: text(r[k]) };
+  }
+  if (r.views != null && map.views) props[map.views.name] = { number: Number(r.views) };
+  if (r.uploads != null && map.uploads) props[map.uploads.name] = { number: Number(r.uploads) };
+  if (r.views != null && map.checked && today) props[map.checked.name] = { date: { start: today } };
+  return props;
 }
 
 export function normalizePost(page, map) {

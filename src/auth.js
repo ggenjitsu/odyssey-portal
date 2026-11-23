@@ -60,10 +60,18 @@ export async function acceptInvite(db, token, password) {
   return db.prepare('SELECT * FROM users WHERE id = ? AND active = 1').get(invite.user_id) || null;
 }
 
-export function createApiKey(db, name) {
+export function createApiKey(db, name, scope = 'read') {
   const key = `ody_${newToken()}`;
-  db.prepare('INSERT INTO api_keys (name, key_hash, created_at) VALUES (?, ?, ?)').run(name, sha256(key), nowIso());
+  db.prepare('INSERT INTO api_keys (name, key_hash, created_at, scope) VALUES (?, ?, ?, ?)').run(name, sha256(key), nowIso(), scope === 'full' ? 'full' : 'read');
   return key;
+}
+
+// Who a key belongs to and what it may do, or null for a key that is unknown or switched off.
+export function apiKeyInfo(db, key) {
+  const row = db.prepare('SELECT id, name, scope FROM api_keys WHERE key_hash = ? AND revoked_at IS NULL').get(sha256(String(key || '')));
+  if (!row) return null;
+  db.prepare('UPDATE api_keys SET last_used_at = ? WHERE id = ?').run(nowIso(), row.id);
+  return row;
 }
 
 export function apiKeyValid(db, key) {

@@ -777,24 +777,26 @@ function peopleView() {
       h('div', { class: 'page-head' }, h('div', {}, h('h1', { class: 'title' }, 'People'))),
       panel('Add someone', 'They get a link and choose their own password', add),
       panel('Everyone with a login', null, h('div', { class: 'rows' }, users.map(personRow))),
-      panel('Assistants', 'Read-only access for Grok or another assistant', h('div', {},
+      panel('Assistants', 'Access for Grok or another assistant', h('div', {},
         h('form', { class: 'form-grid',
           onsubmit: (e) => {
             e.preventDefault();
-            const name = new FormData(e.target).get('name');
-            send(async () => { state.newKey = (await api('/admin/api-keys', { method: 'POST', body: { name } })).key; }, 'Key made. Copy it now, it is shown once');
+            const f = Object.fromEntries(new FormData(e.target));
+            send(async () => { state.newKey = (await api('/admin/api-keys', { method: 'POST', body: f })).key; }, 'Key made. Copy it now, it is shown once');
           } },
           field('What will use it', h('input', { class: 'input input-sm', name: 'name', placeholder: 'Grok', autocomplete: 'off', required: true })),
+          field('What it may do', h('select', { class: 'input input-sm', name: 'scope' },
+            h('option', { value: 'read' }, 'Read only'), h('option', { value: 'full' }, 'Read and make changes'))),
           h('button', { class: 'btn btn-primary', type: 'submit' }, icon('plus'), 'Make a key')),
         state.newKey && h('div', { class: 'linkbox keybox' },
           copyRow('Server address', `${location.origin}/mcp`),
           copyRow('Key, sent as the header Authorization: Bearer <key>', state.newKey),
           copyRow('Or one address with the key inside, for assistants that only take a URL', `${location.origin}/mcp/${state.newKey}`),
-          h('p', { class: 'small' }, 'This is the only time the key is shown. Anyone with it can read the portal, so share it with the assistant only')),
+          h('p', { class: 'small' }, 'This is the only time the key is shown. Anyone with it can use the portal as that assistant, so share it with the assistant only and keep it out of screenshots')),
         h('div', { class: 'rows' }, (state.keys || []).map((k) => h('div', { class: 'row person' },
           h('div', { class: 'client-name' }, k.name),
+          h('div', { class: 'small' }, k.scope === 'full' ? 'Can read and make changes' : 'Read only'),
           h('div', { class: 'small' }, k.revoked_at ? 'Switched off' : k.last_used_at ? `Last used ${ago(k.last_used_at)}` : 'Not used yet'),
-          h('div', {}),
           h('div', { class: 'actions' }, !k.revoked_at && h('button', { class: 'btn btn-quiet', type: 'button',
             onclick: () => send(() => api(`/admin/api-keys/${k.id}`, { method: 'DELETE' }), `${k.name} switched off`) }, 'Switch off')))))))));
 }

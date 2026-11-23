@@ -197,10 +197,40 @@ test('an assistant can read the portal over MCP with a key, and only with a key'
   assert.deepEqual([init.result.protocolVersion, init.result.serverInfo.name], ['2025-03-26', 'odyssey-portal']);
   assert.equal((await rpc(`/mcp/${key}`, { jsonrpc: '2.0', method: 'notifications/initialized' })).statusCode, 202);
   const tools = (await rpc(`/mcp/${key}`, { jsonrpc: '2.0', id: 2, method: 'tools/list' })).json().result.tools.map((t) => t.name);
-  assert.deepEqual(tools, ['portal_overview', 'client_report', 'client_uploads']);
+  assert.deepEqual(tools, ['portal_overview', 'client_report', 'client_uploads', 'list_videos']);
   const call = async (name, args) => (await rpc(`/mcp/${key}`, { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name, arguments: args } })).json().result.content[0].text;
   assert.match(await call('portal_overview', {}), /Clients:\n- Cino: .*in production/);
   assert.match(await call('client_report', { client: 'Cino' }), /^Cino: .*By stage: /s);
   assert.match(await call('client_uploads', { client: 'nobody' }), /No client by that name\. Clients: Cino, Noah/);
   assert.equal((await app.inject({ method: 'GET', url: '/mcp' })).statusCode, 405);
+});
+
+test('a full-access key can make changes through the assistant endpoint, a read-only key cannot', async () => {
+  const { app, db, boards, login } = await setup();
+  const boss = await login('boss@odyssey.test');
+  const make = async (scope) => (await app.inject({ method: 'POST', url: '/api/admin/api-keys', cookies: boss, headers: { 'x-portal': '1' }, payload: { name: `Grok ${scope}`, scope } })).json().key;
+  const [reader, full] = [await make('read'), await make('full')];
+  const rpc = async (key, method, params) => (await app.inject({ method: 'POST', url: `/mcp/${key}`, payload: { jsonrpc: '2.0', id: 1, method, params } })).json().result;
+  const call = async (key, name, args) => (await rpc(key, 'tools/call', { name, arguments: args })).content[0].text;
+  assert.equal((await rpc(reader, 'tools/list')).tools.length, 4);
+  assert.equal((await rpc(full, 'tools/list')).tools.length, 11);
+  assert.match(await call(reader, 'list_videos', { client: 'cino', stage: 'editing' }), /c2 \| Editing \| Cino in edit/);
+  assert.match(await call(reader, 'set_video_stage', { video_id: 'c2', stage: 'Review' }), /can only read/);
+  assert.equal(boards.cino.pages[1].properties.Status.status.name, 'Editing');
+
+  assert.match(await call(full, 'set_video_stage', { video_id: 'c2', stage: 'Review' }), /Done\. "Cino in edit" is now in Review/);
+  assert.match(await call(full, 'review_video', { video_id: 'c2', decision: 'send_back', note: 'Tighten the first three seconds' }), /now in Revisions/);
+  assert.equal(boards.cino.pages[1].properties.Status.status.name, 'Revisions');
+  assert.equal(db.prepare("SELECT author FROM feedback WHERE card_id = 'c2'").get().author, 'Grok full');
+  assert.match(db.prepare("SELECT note FROM events WHERE card_id = 'c2' ORDER BY id DESC").get().note, /via Grok full/);
+  assert.match(await call(full, 'mark_video_posted', { video_id: 'c3', date: '2026-11-22', link: 'https://www.tiktok.com/@elena/video/1' }), /now in Posted/);
+  assert.match(await call(full, 'update_client', { client: 'cino', package_from: 60, package_to: 90, last_invoice_date: '2026-11-20' }), /Cino: 1 of 60 to 90 posted since the invoice on 2026-11-20/);
+
+  boards.log = { schema: { Post: { type: 'title' }, Link: { type: 'url' }, 'Posted Date': { type: 'date' }, Views: { type: 'number' }, Platform: { type: 'select' }, Account: { type: 'select' } }, pages: [] };
+  assert.match(await call(full, 'log_uploads', { client: 'cino', uploads: [{ link: 'https://x.test/1' }] }), /no Posted links list/);
+  db.prepare("UPDATE clients SET posts_data_source_id = 'log' WHERE slug = 'cino'").run();
+  const up = [{ link: 'https://www.instagram.com/elena/reel/abc/', date: '2026-11-21', views: 1200 }, { link: 'https://www.youtube.com/shorts/xyz', date: '2026-11-21', views: 300, account: '@elena' }];
+  assert.match(await call(full, 'log_uploads', { client: 'cino', uploads: up }), /2 added, 0 updated\. Cino now has 1,500 views on 2 logged uploads/);
+  assert.match(await call(full, 'log_uploads', { client: 'cino', uploads: [{ link: 'https://www.instagram.com/elena/reel/abc', views: 5000 }] }), /0 added, 1 updated\. Cino now has 5,300 views/);
+  assert.match(await call(full, 'client_uploads', { client: 'cino', sort: 'most_viewed' }), /Instagram \| @elena \| 5,000 views/);
 });

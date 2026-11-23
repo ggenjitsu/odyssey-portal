@@ -58,6 +58,15 @@ export function fakeNotion(boards, { pageSize = 2 } = {}) {
       const more = start + pageSize < board.pages.length;
       return json({ results, has_more: more, next_cursor: more ? String(start + pageSize) : null });
     }
+    if (path === '/pages' && init.method === 'POST') {
+      const board = boards[body.parent.data_source_id];
+      if (!board) return json({ code: 'object_not_found', message: 'not found' }, 404);
+      const made = { object: 'page', id: `new-${board.pages.length + 1}`, url: 'https://notion.test/new', created_time: '2026-11-23T10:00:00.000Z', last_edited_time: '2026-11-23T10:00:00.000Z', in_trash: false,
+        properties: Object.fromEntries(Object.entries(body.properties).map(([k, v]) => [k, { type: Object.keys(v)[0], ...v }])) };
+      for (const p of Object.values(made.properties)) if (p.title) p.title = p.title.map((t) => ({ plain_text: t.text.content }));
+      board.pages.push(made);
+      return json(made);
+    }
     const pg = /^\/pages\/([^/]+)$/.exec(path);
     if (pg) {
       const p = findPage(pg[1]);

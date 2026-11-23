@@ -5,7 +5,7 @@ import cookie from '@fastify/cookie';
 import fastifyStatic from '@fastify/static';
 import { nowIso, getSetting, setSetting } from './db.js';
 import {
-  hashPassword, verifyPassword, createSession, destroySession, sessionUser, createInvite, acceptInvite, createApiKey, apiKeyValid,
+  hashPassword, verifyPassword, createSession, destroySession, sessionUser, createInvite, acceptInvite, createApiKey, apiKeyValid, apiKeyInfo,
   SESSION_DAYS, MIN_PASSWORD,
 } from './auth.js';
 import { adminOverview, clientOverview, clientBoard, editorOverview, recentEvents, lastSync } from './metrics.js';
@@ -468,14 +468,15 @@ export async function buildServer({ db, cfg, notion = null, slack = null, stripe
 
   // Assistants (Grok and the like) talk to the portal here, read-only, with a key made on the People page.
   // The key goes in the Authorization header, or at the end of the address for clients that only take a URL.
-  const mcp = createMcp({ db, cfg });
+  const mcp = createMcp({ db, cfg, notion, jobs });
   const mcpPost = async (req, reply) => {
     const key = req.params.key || /^Bearer (\S+)$/.exec(req.headers.authorization || '')?.[1] || '';
-    if (!apiKeyValid(db, key)) {
+    const who = apiKeyInfo(db, key);
+    if (!who) {
       return reply.code(401).header('www-authenticate', 'Bearer').send({ jsonrpc: '2.0', id: null, error: { code: -32001, message: 'A valid portal key is required' } });
     }
     const body = req.body;
-    const out = Array.isArray(body) ? body.map(mcp).filter(Boolean) : mcp(body);
+    const out = Array.isArray(body) ? (await Promise.all(body.map((m) => mcp(m, who)))).filter(Boolean) : await mcp(body, who);
     if (out == null || (Array.isArray(out) && !out.length)) return reply.code(202).send();
     return reply.header('cache-control', 'no-store').send(out);
   };
@@ -487,12 +488,12 @@ export async function buildServer({ db, cfg, notion = null, slack = null, stripe
   app.get('/.well-known/*', async (req, reply) => reply.code(404).send({ error: 'Not found' }));
 
   app.get('/api/admin/api-keys', admin, async () => ({
-    keys: db.prepare('SELECT id, name, created_at, last_used_at, revoked_at FROM api_keys ORDER BY id DESC').all(),
+    keys: db.prepare('SELECT id, name, scope, created_at, last_used_at, revoked_at FROM api_keys ORDER BY id DESC').all(),
   }));
   app.post('/api/admin/api-keys', admin, async (req, reply) => {
     const name = String(req.body?.name || '').trim();
     if (!name) return reply.code(400).send({ error: 'Name the key so you know what uses it' });
-    return { key: createApiKey(db, name), note: 'Shown once. Store it now' };
+    return { key: createApiKey(db, name, req.body?.scope === 'full' ? 'full' : 'read'), note: 'Shown once. Store it now' };
   });
   app.delete('/api/admin/api-keys/:id', admin, async (req) => {
     db.prepare('UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL').run(nowIso(), Number(req.params.id));
